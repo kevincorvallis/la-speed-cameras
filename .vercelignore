@@ -1,0 +1,13 @@
+# Only the static site goes to Vercel. No package.json there, so Vercel runs no install and no build.
+node_modules
+tests
+test-results
+playwright-report
+scripts
+screenshots
+package.json
+package-lock.json
+playwright.config.js
+README.md
+.claude
+vendor/.claude

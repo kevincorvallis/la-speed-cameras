@@ -1,0 +1,91 @@
+# LA speed cameras near you
+
+Enter an address. The map counts the Los Angeles speed cameras near it and shows where each one stands.
+
+This is not a city website. The camera data comes from LADOT.
+
+Live site: https://la-speed-cameras-nine.vercel.app
+
+![The map after a search for 200 N Spring St](screenshots/desktop.png)
+
+## Run it
+
+The site is static. It has no build step and no API key.
+
+```bash
+python3 -m http.server 4173 --bind 127.0.0.1
+```
+
+Open http://localhost:4173. The page must come from a web server: the map worker does not load from a `file://` path.
+
+## Test it
+
+```bash
+npm install
+```
+
+```bash
+npm test
+```
+
+`npm test` runs four suites at the same time and prints one line for each.
+
+| Suite | Command | What it checks |
+| --- | --- | --- |
+| lint | `npm run test:lint` | The scripts parse |
+| unit | `npm run test:unit` | `lib.js` (status, distance, address matching, live-data merge, sign layout) and the files in `data/` |
+| build | `npm run test:py` | The join in `scripts/build_data.py` |
+| browser | `npm run test:e2e` | The page in Chromium and WebKit at six screen sizes |
+
+The browser suite fakes every outside host (`tests/e2e/mocks.js`), so it needs no network. It starts its own server on port 4174.
+
+## Where the data comes from
+
+| What | Source |
+| --- | --- |
+| Cameras and their status | LADOT's Speed Safety System map, read live on each page load |
+| Corridors, speed limits, city limits | A saved copy of LADOT's layers in `data/` |
+| Address search | Los Angeles County's address finder (CAMS). Photon adds places the county finder lacks, and answers when it is down |
+| Map tiles | OpenFreeMap (OpenStreetMap data) |
+
+When LADOT's live data does not load, or its fields change, the page keeps the saved copy and says so under the panel.
+
+## How it counts
+
+- A camera watches a stretch of street. LADOT's point is only a label on that stretch. The distance from an address goes to the nearest part of the stretch.
+- Enter picks an address only when one strong match exists. When several places tie, or the text is vague, the page shows the choices.
+- A status label repeats LADOT's listing. The data has no switch-on dates, so the page does not say when fines start for a camera.
+
+## Deploy it
+
+The site is on Vercel. `.vercelignore` keeps the tests, the scripts and `package.json` out of the upload, so Vercel runs no install and no build.
+
+```bash
+vercel deploy --prod --yes
+```
+
+## Refresh the saved copy
+
+```bash
+python3 scripts/build_data.py
+```
+
+Run it when LADOT adds, moves or removes a camera. A status change alone needs no refresh.
+
+## Quirks in LADOT's data
+
+- The camera `ID` is not unique: `12-6` appears twice. The code keys cameras by `OBJECTID` and by street names.
+- One corridor spells a cross street differently from its camera. The build script joins that pair by position.
+- LADOT's legend has three status values: `Under Construction`, `Warning Live` and `Citation Live`. A value the code does not know shows with LADOT's own text and does not count as on.
+- LADOT's map and its council district lists disagree on the speed limit for two cameras (S La Cienega Blvd and S Slauson Ave). `LIMIT_CONFLICTS` in the build script records the second value, and the page shows both.
+- The map layer counts 125 camera systems. Each system has two poles, which the page does not draw.
+
+## Files
+
+- `index.html`, `styles.css`, `app.js`: the page
+- `lib.js`: the logic with no page or network in it
+- `data/`: the saved copy
+- `scripts/build_data.py`: makes the saved copy
+- `scripts/ci.sh`: runs every test suite at once
+- `tests/`: the tests
+- `vendor/`: MapLibre GL JS 6.18.0
