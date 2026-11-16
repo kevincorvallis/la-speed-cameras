@@ -170,6 +170,24 @@ h1:focus { outline: none; } /* a heading that takes focus after a view change */
 .sign--big::after { top: -7px; right: -7px; width: 18px; height: 18px; box-shadow: 0 0 0 3px #fff; }
 .sign--big[data-status="build"]::after { box-shadow: inset 0 0 0 4px var(--build), 0 0 0 3px #fff; }
 
+/* While a route shows, the cameras off it fade. A camera someone opened stays clear.
+   The fade goes on the button: MapLibre writes its own opacity on the marker itself. */
+.has-route .cam:not(.is-near):not(.is-selected) .cam__btn { opacity: 0.3; }
+
+/* A drive: the route, and the letters at its two ends */
+.pin--end {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding-top: 2px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
+.pin--end[data-end="to"] { background: var(--ink); }
+
 /* Address pin */
 .pin {
   width: 22px;
@@ -201,11 +219,6 @@ h1:focus { outline: none; } /* a heading that takes focus after a view change */
 .search {
   position: relative;
   flex: none;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  height: 58px;
-  padding: 0 10px 0 18px;
   background: var(--guide);
   border-radius: 13px;
   box-shadow:
@@ -215,11 +228,45 @@ h1:focus { outline: none; } /* a heading that takes focus after a view change */
   color: #fff;
 }
 .search:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
+.search__row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 58px;
+  padding: 0 10px 0 18px;
+}
+.search__row[hidden], .search__trip[hidden] { display: none; }
+/* A drive: two lines on the sign, start over end, like a guide sign with two exits. */
+.search__trip { padding: 5px 0; }
+.search__trip .search__row { position: relative; height: 51px; padding-left: 15px; }
+.search__trip .search__row + .search__row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 16px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.42);
+}
+.search__end {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  padding-top: 2px;
+  border-radius: 50%;
+  background: #fff;
+  color: var(--guide-deep);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
 .search__btn:focus-visible { outline: 2px solid #fff; outline-offset: -3px; }
 .search.is-busy .search__icon { animation: pulse 0.6s ease-in-out infinite alternate; }
 .search svg {
   width: 22px; height: 22px; flex: none;
-  fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round;
+  fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
 }
 .search svg .fill { fill: currentColor; stroke: none; }
 .search input {
@@ -484,6 +531,41 @@ h2 {
   text-decoration: none;
 }
 .btn:hover { background: #000; }
+button.btn { border: 0; }
+.btn svg { width: 20px; height: 20px; margin: -2px 8px 0 -2px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Route choices: one row for each route, with its camera count */
+.routes { display: grid; gap: 8px; margin-top: 18px; }
+.routes button {
+  display: grid;
+  grid-template-columns: 3.1em 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 14px 9px 10px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--wash);
+  text-align: left;
+  line-height: 1.3;
+}
+.routes button[aria-checked="true"] { background: var(--ink); color: #fff; }
+.routes__n {
+  display: grid;
+  justify-items: center;
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  padding-top: 0.1em;
+}
+.routes__n small { font-size: 11.5px; font-weight: 600; letter-spacing: 0.01em; margin-top: 1px; }
+.routes strong { display: block; font-size: 16px; font-weight: 700; }
+.routes small { display: block; font-size: 13.5px; }
+.routes button > span:last-child small { opacity: 0.82; }
+.trip__sum { margin-top: 6px; color: var(--asphalt); }
+.crossed { margin-top: 22px; }
+.crossed p { padding: 0 0 6px; color: var(--asphalt); font-size: 14px; }
+.crossed .cams { padding-bottom: 6px; }
 
 /* Fines and source */
 .foot { margin-top: 24px; }
@@ -529,8 +611,9 @@ h2 {
     top: calc(var(--safe-t) + 10px);
     left: calc(env(safe-area-inset-left, 0px) + 10px);
     right: calc(env(safe-area-inset-right, 0px) + 10px);
-    height: 56px;
   }
+  .search__row { height: 56px; }
+  .search__trip .search__row { height: 49px; }
   .suggest { max-height: min(46dvh, 360px); }
 
   .panel {
@@ -573,4 +656,10 @@ h2 {
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+
+/* A very narrow phone: the address field needs the room more than the looking glass does. */
+@media (max-width: 380px) {
+  #near { padding-left: 12px; }
+  #near .search__icon { display: none; }
 }

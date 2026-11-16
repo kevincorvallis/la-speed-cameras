@@ -400,3 +400,248 @@ export function snapFor(height, velocity, snaps) {
   return Object.keys(snaps).reduce((best, name) =>
     (Math.abs(snaps[name] - target) < Math.abs(snaps[best] - target) ? name : best));
 }
+
+/* ---------- Routes ---------- */
+
+// Flat-map scale for Los Angeles. Good to a few feet across the city, which is all a route needs.
+const KY = MILES_PER_DEGREE;
+const KX = MILES_PER_DEGREE * Math.cos(rad(34.05));
+const flat = ([lon, lat]) => [lon * KX, lat * KY];
+
+const ROUTE_STEP = 0.006; // miles between route samples: about 10 m
+const ROUTE_SLACK = 0.0075; // a sample this near a stretch counts as on it: about 12 m
+const AXIS_REACH = 0.075; // outline within this distance gives the stretch's direction: about 120 m
+const ALONG_COS = Math.cos(rad(35)); // the route runs along the stretch within 35 degrees
+const ALONG_MIN = 0.03; // drive this far along a stretch and its camera counts: about 50 m
+const INSIDE_MIN = 0.1; // or stay this long on the stretch, whatever the direction: about 160 m
+const POINT_REACH = 0.03; // a camera with no stretch counts when the route passes this near
+
+/** Decode an encoded polyline to [lon, lat] pairs. Valhalla uses 6 decimals. */
+export function decodePolyline(text, precision = 6) {
+  const factor = 10 ** precision;
+  const out = [];
+  let i = 0;
+  let lat = 0;
+  let lon = 0;
+  const next = () => {
+    let result = 0;
+    let shift = 0;
+    let byte;
+    do {
+      byte = text.charCodeAt(i++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20 && i < text.length);
+    return result & 1 ? ~(result >> 1) : result >> 1;
+  };
+  while (i < text.length) {
+    lat += next();
+    lon += next();
+    out.push([lon / factor, lat / factor]);
+  }
+  return out;
+}
+
+/** Miles along a line of [lon, lat] pairs. */
+export function lineMiles(coords) {
+  let total = 0;
+  for (let i = 1; i < coords.length; i++) total += miles(coords[i - 1][1], coords[i - 1][0], coords[i][1], coords[i][0]);
+  return total;
+}
+
+/** Points along a line, at most `step` miles apart. Each: { lon, lat, at } with miles from the start. */
+export function sampleLine(coords, step = ROUTE_STEP) {
+  const out = [];
+  let at = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const [aLon, aLat] = coords[i];
+    const [bLon, bLat] = coords[i + 1];
+    const len = miles(aLat, aLon, bLat, bLon);
+    const parts = Math.max(1, Math.ceil(len / step));
+    for (let k = 0; k < parts; k++) {
+      const t = k / parts;
+      out.push({ lon: aLon + (bLon - aLon) * t, lat: aLat + (bLat - aLat) * t, at: at + len * t });
+    }
+    at += len;
+  }
+  if (coords.length) {
+    const [lon, lat] = coords.at(-1);
+    out.push({ lon, lat, at });
+  }
+  return out;
+}
+
+const shapes = new WeakMap(); // corridor geometry -> its box and outline points
+
+/** A corridor's box (with slack) and points every 15 m or so along its outline, on the flat map. */
+function shapeOf(geom) {
+  let shape = shapes.get(geom);
+  if (shape) return shape;
+  const box = [Infinity, Infinity, -Infinity, -Infinity];
+  const outline = [];
+  for (const poly of polygonsOf(geom)) {
+    for (const ring of poly) {
+      for (let i = 0; i < ring.length - 1; i++) {
+        const [ax, ay] = flat(ring[i]);
+        const [bx, by] = flat(ring[i + 1]);
+        const parts = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 0.009));
+        for (let k = 0; k < parts; k++) outline.push([ax + ((bx - ax) * k) / parts, ay + ((by - ay) * k) / parts]);
+        box[0] = Math.min(box[0], ax); box[1] = Math.min(box[1], ay);
+        box[2] = Math.max(box[2], ax); box[3] = Math.max(box[3], ay);
+      }
+    }
+  }
+  shape = { box: [box[0] - ROUTE_SLACK, box[1] - ROUTE_SLACK, box[2] + ROUTE_SLACK, box[3] + ROUTE_SLACK], outline };
+  shapes.set(geom, shape);
+  return shape;
+}
+
+/**
+ * The direction a stretch of street runs near a point, as a unit vector (either way along it).
+ * The two long sides of the outline lie along the street, so the direction in which the
+ * nearby outline points spread the most is the street's direction.
+ */
+function axisNear(outline, x, y) {
+  let n = 0;
+  let mx = 0;
+  let my = 0;
+  const near = [];
+  for (const p of outline) {
+    if (Math.abs(p[0] - x) > AXIS_REACH || Math.abs(p[1] - y) > AXIS_REACH) continue;
+    near.push(p); mx += p[0]; my += p[1]; n += 1;
+  }
+  if (n < 3) return null;
+  mx /= n; my /= n;
+  let sxx = 0;
+  let syy = 0;
+  let sxy = 0;
+  for (const p of near) {
+    const dx = p[0] - mx;
+    const dy = p[1] - my;
+    sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+  }
+  const angle = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  return [Math.cos(angle), Math.sin(angle)];
+}
+
+/**
+ * The cameras a drive passes. `coords` is the route as [lon, lat] pairs.
+ * A camera counts ("hit") when the route runs along the stretch of street it watches.
+ * A route that only cuts across the stretch, at a cross street or on a freeway bridge,
+ * is listed apart ("crossed"): the camera does not watch that traffic.
+ * When the two are hard to tell apart, the camera counts.
+ *   hits: [{ oid, at, miles, line }]  at = miles from the start, line = the part of the route on the stretch
+ *   crossed: [{ oid, at }]
+ * Both come in driving order.
+ */
+export function camerasOnRoute(coords, cameras, corridorOf) {
+  const samples = sampleLine(coords);
+  const pts = samples.map((s) => flat([s.lon, s.lat]));
+  const hits = [];
+  const crossed = [];
+  for (const cam of cameras) {
+    const geom = corridorOf.get(cam.oid);
+    if (!geom) {
+      // No stretch on file (a camera LADOT added after the saved copy). Use its point.
+      const [cx, cy] = flat([cam.lon, cam.lat]);
+      const i = pts.findIndex((p) => Math.hypot(p[0] - cx, p[1] - cy) <= POINT_REACH);
+      if (i >= 0) hits.push({ oid: cam.oid, at: samples[i].at, miles: 0, line: [] });
+      continue;
+    }
+    const { box, outline } = shapeOf(geom);
+    let first = -1;
+    let inside = 0;
+    let along = 0;
+    const line = [];
+    for (let i = 0; i < samples.length; i++) {
+      const [x, y] = pts[i];
+      if (x < box[0] || x > box[2] || y < box[1] || y > box[3]) continue;
+      if (milesToGeometry(geom, samples[i].lat, samples[i].lon) > ROUTE_SLACK) continue;
+      if (first < 0) first = i;
+      const a = pts[Math.max(0, i - 1)];
+      const b = pts[Math.min(pts.length - 1, i + 1)];
+      const step = Math.hypot(b[0] - a[0], b[1] - a[1]) / (i > 0 && i < pts.length - 1 ? 2 : 1);
+      inside += step;
+      const axis = axisNear(outline, x, y);
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const cos = axis && len ? Math.abs(((b[0] - a[0]) * axis[0] + (b[1] - a[1]) * axis[1]) / len) : 0;
+      if (cos >= ALONG_COS) {
+        along += step;
+        line.push([samples[i].lon, samples[i].lat]);
+      }
+    }
+    if (first < 0) continue;
+    if (along >= ALONG_MIN || inside >= INSIDE_MIN) {
+      hits.push({ oid: cam.oid, at: samples[first].at, miles: Math.max(along, ALONG_MIN), line });
+    } else {
+      crossed.push({ oid: cam.oid, at: samples[first].at });
+    }
+  }
+  const order = (a, b) => a.at - b.at;
+  return { hits: hits.sort(order), crossed: crossed.sort(order) };
+}
+
+/** The two streets a route spends the most miles on: "Harbor Freeway and Santa Monica Freeway". */
+function viaOf(parts) {
+  const total = new Map();
+  for (const [name, len] of parts) {
+    if (name) total.set(name, (total.get(name) ?? 0) + len);
+  }
+  return [...total].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([name]) => name).join(' and ');
+}
+
+/** One Valhalla trip as a route: { coords, miles, minutes, via }. Null when it has no usable line. */
+export function routeFromValhalla(trip) {
+  const leg = trip?.legs?.[0];
+  if (typeof leg?.shape !== 'string') return null;
+  const coords = decodePolyline(leg.shape);
+  if (coords.length < 2) return null;
+  const seconds = Number(trip.summary?.time);
+  return {
+    coords,
+    miles: Number(trip.summary?.length) || lineMiles(coords),
+    minutes: Number.isFinite(seconds) ? Math.max(1, Math.round(seconds / 60)) : null,
+    via: viaOf((leg.maneuvers ?? []).map((m) => [m.street_names?.[0], Number(m.length) || 0])),
+  };
+}
+
+/** One OSRM route as a route. */
+export function routeFromOsrm(r) {
+  const coords = r?.geometry?.coordinates;
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+  const seconds = Number(r.duration);
+  return {
+    coords,
+    miles: Number.isFinite(Number(r.distance)) ? Number(r.distance) / 1609.344 : lineMiles(coords),
+    minutes: Number.isFinite(seconds) ? Math.max(1, Math.round(seconds / 60)) : null,
+    via: viaOf((r.legs?.[0]?.steps ?? []).map((s) => [s.name, Number(s.distance) || 0])),
+  };
+}
+
+/** True when two routes follow the same streets: 20 points of one all lie on the other. */
+export function sameRoute(a, b) {
+  if (Math.abs(a.miles - b.miles) > Math.max(0.2, a.miles * 0.03)) return false;
+  const line = b.coords.map(flat);
+  for (let k = 1; k <= 20; k++) {
+    const [x, y] = flat(a.coords[Math.floor(((a.coords.length - 1) * k) / 21)]);
+    let best = Infinity;
+    for (let i = 0; i < line.length - 1 && best > 0.02; i++) {
+      const dx = line[i + 1][0] - line[i][0];
+      const dy = line[i + 1][1] - line[i][1];
+      const len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((x - line[i][0]) * dx + (y - line[i][1]) * dy) / len2)) : 0;
+      best = Math.min(best, Math.hypot(line[i][0] + t * dx - x, line[i][1] + t * dy - y));
+    }
+    if (best > 0.02) return false;
+  }
+  return true;
+}
+
+/** "25 min", "1 hr 5 min". */
+export function formatMinutes(min) {
+  if (!Number.isFinite(min)) return '';
+  if (min < 60) return `${Math.round(min)} min`;
+  const h = Math.floor(min / 60);
+  const m = Math.round(min - h * 60);
+  return m ? `${h} hr ${m} min` : `${h} hr`;
+}

@@ -2,6 +2,8 @@
 
 Enter an address. The map counts the Los Angeles speed cameras near it and shows where each one stands.
 
+Or map a drive, such as a commute. The map counts the cameras on the route, in driving order.
+
 This is not a city website. The camera data comes from LADOT.
 
 Live site: https://la-speed-cameras-nine.vercel.app
@@ -33,11 +35,13 @@ npm test
 | Suite | Command | What it checks |
 | --- | --- | --- |
 | lint | `npm run test:lint` | The scripts parse |
-| unit | `npm run test:unit` | `lib.js` (status, distance, address matching, live-data merge, sign layout) and the files in `data/` |
+| unit | `npm run test:unit` | `lib.js` (status, distance, address matching, live-data merge, sign layout, routes) and the files in `data/` |
 | build | `npm run test:py` | The join in `scripts/build_data.py` |
 | browser | `npm run test:e2e` | The page in Chromium and WebKit at six screen sizes |
 
 The browser suite fakes every outside host (`tests/e2e/mocks.js`), so it needs no network. It starts its own server on port 4174.
+
+The route tests use real routes saved in `tests/fixtures/routes.json`. `node scripts/fetch_route_fixtures.mjs` fetches them again.
 
 GitHub Actions runs the same four suites on each push (`.github/workflows/tests.yml`).
 
@@ -48,6 +52,7 @@ GitHub Actions runs the same four suites on each push (`.github/workflows/tests.
 | Cameras and their status | LADOT's Speed Safety System map, read live on each page load |
 | Corridors, speed limits, city limits | A saved copy of LADOT's layers in `data/` |
 | Address search | Los Angeles County's address finder (CAMS). Photon adds places the county finder lacks, and answers when it is down |
+| Routes | Valhalla on the German OpenStreetMap group's server (`valhalla1.openstreetmap.de`). OSRM on `routing.openstreetmap.de` answers when Valhalla is down |
 | Map tiles | OpenFreeMap (OpenStreetMap data) |
 
 When LADOT's live data does not load, or its fields change, the page keeps the saved copy and says so under the panel.
@@ -56,7 +61,15 @@ When LADOT's live data does not load, or its fields change, the page keeps the s
 
 - A camera watches a stretch of street. LADOT's point is only a label on that stretch. The distance from an address goes to the nearest part of the stretch.
 - Enter picks an address only when one strong match exists. When several places tie, or the text is vague, the page shows the choices.
+- A drive counts a camera when the route runs along the stretch of street the camera watches. A route that only cuts across the stretch, or passes over it on a freeway, does not count: the page lists those streets apart. When the two are hard to tell apart, the camera counts.
+- A drive shows two routes when they differ: the fastest, and one that avoids freeways. Every camera stands on a city street, so the fastest route alone can read "0 cameras" for a trip that passes several on city streets.
+- Drive times are without traffic. The route services know no traffic.
 - A status label repeats LADOT's listing. The data has no switch-on dates, so the page does not say when fines start for a camera.
+
+## Before a public launch
+
+- The start and the end of a drive go to the route service. The page says so under the panel.
+- The route services are free and shared. Their usage terms have not been read. Read them, and the county address finder's terms, before the site gets real traffic.
 
 ## Deploy it
 
@@ -89,5 +102,6 @@ Run it when LADOT adds, moves or removes a camera. A status change alone needs n
 - `data/`: the saved copy
 - `scripts/build_data.py`: makes the saved copy
 - `scripts/ci.sh`: runs every test suite at once
+- `scripts/fetch_route_fixtures.mjs`: saves real routes for the tests
 - `tests/`: the tests
 - `vendor/`: MapLibre GL JS 6.18.0

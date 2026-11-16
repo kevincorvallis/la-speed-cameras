@@ -1,6 +1,6 @@
 // A fake of every outside host the page calls, so the browser tests need no network.
 import { readFileSync } from 'node:fs';
-import { cameraDistance } from '../../lib.js';
+import { cameraDistance, camerasOnRoute, decodePolyline, routeFromValhalla } from '../../lib.js';
 
 const read = (name) => JSON.parse(readFileSync(new URL(`../../data/${name}`, import.meta.url), 'utf8'));
 export const cameras = read('cameras.json').cameras;
@@ -24,6 +24,49 @@ export const PLACES = {
   e99: { text: 'E 99th St, Inglewood, 90301', lat: 33.9467, lon: -118.3518, type: 'StreetName' },
 };
 export const SAN_FRANCISCO = { lat: 37.7749, lon: -122.4194 };
+
+// Real routes from the route service, saved by scripts/fetch_route_fixtures.mjs.
+const ROUTES = JSON.parse(readFileSync(new URL('../fixtures/routes.json', import.meta.url), 'utf8'));
+// The places a fake drive can start or end at, by their name in the saved routes.
+const ROUTE_ENDS = { cityHall: PLACES.spring, santaMonica: PLACES.santaMonica, melrose: PLACES.melrose };
+
+function encodePolyline(coords) {
+  let out = '';
+  let last = [0, 0];
+  for (const [lon, lat] of coords) {
+    const next = [Math.round(lat * 1e6), Math.round(lon * 1e6)];
+    for (let k = 0; k < 2; k++) {
+      let v = (next[k] - last[k]) << 1;
+      if (v < 0) v = ~v;
+      while (v >= 0x20) { out += String.fromCharCode((0x20 | (v & 0x1f)) + 63); v >>>= 5; }
+      out += String.fromCharCode(v + 63);
+    }
+    last = next;
+  }
+  return out;
+}
+
+const endName = ({ lat, lon }) => Object.keys(ROUTE_ENDS)
+  .find((name) => Math.abs(ROUTE_ENDS[name].lat - lat) < 0.001 && Math.abs(ROUTE_ENDS[name].lon - lon) < 0.001);
+
+/** The saved trip for a drive. `kind` is 'fast' or 'streets'. A drive the other way gets the same line, reversed. */
+export function tripFor(kind, from, to) {
+  const [a, b] = [endName(from), endName(to)];
+  const there = ROUTES[`${kind}:${a}-${b}`];
+  if (there) return there.trip;
+  const back = ROUTES[`${kind}:${b}-${a}`];
+  if (!back) return null;
+  const leg = back.trip.legs[0];
+  return { ...back.trip, legs: [{ ...leg, shape: encodePolyline(decodePolyline(leg.shape).reverse()) }] };
+}
+
+/** The cameras the page must count on a drive, from the same saved data: { hits, crossed } with streets. */
+export function expectedOnRoute(kind, from, to) {
+  const route = routeFromValhalla(tripFor(kind, from, to));
+  const found = camerasOnRoute(route.coords, cameras, corridorOf);
+  const street = (h) => cameras.find((c) => c.oid === h.oid).street;
+  return { hits: found.hits.map(street), crossed: found.crossed.map(street) };
+}
 
 // What the fake county finder suggests while typing.
 const SUGGEST = [
@@ -76,10 +119,19 @@ const MAP_STYLE = {
  *   ladot / county / photon / tiles: 'ok' or 'down'
  *   change: edits LADOT feature properties
  *   locateDelay: ms the county finder waits before it gives a position
+ *   router: 'ok', 'down', 'none' (no road goes there), 'same' (both routes are one route)
+ *           or 'streets-down' (only the fastest route loads)
+ *   backup: 'ok' or 'down', the second route service
+ *   routeDelay: ms the route service waits before it answers
+ * Returns the list of requested URLs. Its `drives` property lists the route requests.
  */
 export async function mockNetwork(page, options = {}) {
-  const o = { ladot: 'ok', county: 'ok', photon: 'ok', tiles: 'ok', change: undefined, locateDelay: 0, ...options };
+  const o = {
+    ladot: 'ok', county: 'ok', photon: 'ok', tiles: 'ok', change: undefined, locateDelay: 0,
+    router: 'ok', backup: 'ok', routeDelay: 0, ...options,
+  };
   const calls = [];
+  calls.drives = [];
   const json = (route, body) => route.fulfill({
     status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(body),
   });
@@ -119,6 +171,41 @@ export async function mockNetwork(page, options = {}) {
     if (host === 'photon.komoot.io') {
       if (o.photon !== 'ok') return route.abort();
       return json(route, { type: 'FeatureCollection', features: lookup(PHOTON, url.searchParams.get('q') ?? '') });
+    }
+
+    if (host === 'valhalla1.openstreetmap.de') {
+      const request = route.request();
+      const body = request.postDataJSON();
+      const [from, to] = body.locations;
+      const streets = body.costing_options?.auto?.use_highways === 0;
+      calls.drives.push({ method: request.method(), from, to, streets });
+      if (o.routeDelay) await new Promise((r) => setTimeout(r, o.routeDelay));
+      if (o.router === 'down' || (o.router === 'streets-down' && streets)) return route.abort();
+      const trip = o.router === 'none' ? null : tripFor(streets && o.router !== 'same' ? 'streets' : 'fast', from, to);
+      if (!trip) {
+        return route.fulfill({
+          status: 400, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
+          body: JSON.stringify({ error_code: 442, error: 'No path could be found for input', status_code: 400 }),
+        });
+      }
+      return json(route, { trip });
+    }
+
+    if (host === 'routing.openstreetmap.de') {
+      if (o.backup !== 'ok') return route.abort();
+      const [from, to] = url.pathname.split('/').pop().split(';').map((pair) => {
+        const [lon, lat] = pair.split(',').map(Number);
+        return { lat, lon };
+      });
+      const trip = tripFor('fast', from, to);
+      return json(route, {
+        code: 'Ok',
+        routes: [{
+          distance: trip.summary.length * 1609.344, duration: trip.summary.time,
+          geometry: { type: 'LineString', coordinates: decodePolyline(trip.legs[0].shape) },
+          legs: [{ steps: trip.legs[0].maneuvers.map((m) => ({ name: m.street_names?.[0] ?? '', distance: m.length * 1609.344 })) }],
+        }],
+      });
     }
 
     return route.abort(); // nothing else may leave the test

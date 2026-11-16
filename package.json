@@ -7,7 +7,7 @@
   "scripts": {
     "start": "python3 -m http.server 4173 --bind 127.0.0.1",
     "test": "sh scripts/ci.sh",
-    "test:lint": "node --check app.js && node --check lib.js && python3 -B -c \"compile(open('scripts/build_data.py').read(), 'build_data.py', 'exec')\"",
+    "test:lint": "node --check app.js && node --check lib.js && node --check scripts/fetch_route_fixtures.mjs && python3 -B -c \"compile(open('scripts/build_data.py').read(), 'build_data.py', 'exec')\"",
     "test:unit": "node --test tests/unit/",
     "test:py": "python3 -B -m unittest discover -s tests -p 'test_*.py'",
     "test:e2e": "playwright test"

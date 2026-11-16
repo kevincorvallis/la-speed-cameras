@@ -5,6 +5,7 @@ import {
   RADII, statusOf, tally, countOn, districtAt, cameraDistance, circle, formatMiles, plural,
   cleanQuery, placeFromText, placeFromPhoton, placeFromCandidate, looksLike, mergeSuggestions,
   decideOnEnter, decideFromSuggestions, mergeLive, signature, layoutSigns, snapFor,
+  camerasOnRoute, routeFromValhalla, routeFromOsrm, sameRoute, formatMinutes,
 } from './lib.js';
 
 const LADOT_LAYER = 'https://services.arcgis.com/G3nmNsarwQblLhip/arcgis/rest/services/CameraSystems_streetnames2/FeatureServer/0';
@@ -14,7 +15,14 @@ const MAP_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 // Photon (OpenStreetMap) adds places the county finder lacks, and answers when it is down.
 const COUNTY_FINDER = 'https://geocode.gis.lacounty.gov/geocode/rest/services/CAMS_Locator/GeocodeServer';
 const PHOTON = 'https://photon.komoot.io/api/';
+// Routes: Valhalla, on the German OpenStreetMap group's server. It can avoid freeways.
+// That matters here: every camera stands on a city street. OSRM answers when Valhalla is down.
+const VALHALLA = 'https://valhalla1.openstreetmap.de/route';
+const OSRM = 'https://routing.openstreetmap.de/routed-car/route/v1/driving';
 const SEARCH_BOX = [-118.95, 33.6, -117.6, 34.85]; // Greater LA: west, south, east, north
+// How strong the camera stretches draw, by zoom. They fade while a route shows.
+const CORRIDOR_FILL = ['interpolate', ['linear'], ['zoom'], 10, 0.25, 12.5, 0.55];
+const CORRIDOR_LINE = ['interpolate', ['linear'], ['zoom'], 9, 0.5, 12, 0.75, 15, 0.4];
 const SIGN_ZOOM = 12.2; // dots turn into signs past this zoom
 const FAR_MILES = 60; // past this, the address is not in the LA area at all
 const SHEET_NAMES = ['peek', 'half', 'full'];
@@ -32,10 +40,17 @@ const el = {
   dock: $('#dock'), search: $('#search'), input: $('#q'), clear: $('#clear'), locate: $('#locate'),
   suggest: $('#suggest'), panel: $('#panel'), grip: $('#grip'), body: $('#body'),
   view: $('#view'), foot: $('#foot'), status: $('#status'),
+  near: $('#near'), trip: $('#trip'), from: $('#from'), to: $('#to'), openTrip: $('#open-trip'),
+  closeTrip: $('#close-trip'), swap: $('#swap'), locateFrom: $('#locate-from'),
 };
+
+/** A drive with nothing entered yet. Each route: { kind, coords, miles, minutes, via, hits, crossed }. */
+const newTrip = () => ({ from: null, to: null, routes: [], pick: 0, phase: 'idle', partial: false });
 
 const state = {
   cameras: [],
+  mode: 'near', // 'near': the cameras near an address. 'trip': the cameras on a drive.
+  trip: newTrip(), // phase: 'idle', 'loading', 'ready', 'failed' or 'none'
   origin: null, // { lat, lon, label, kind, district }
   radius: 2,
   selected: null, // camera oid
@@ -166,14 +181,14 @@ mapReady.then(() => {
   map.addSource('corridors', { type: 'geojson', data: corridorData() });
   map.addLayer({
     id: 'corridors', type: 'fill', source: 'corridors',
-    paint: { 'fill-color': statusColor, 'fill-opacity': ['interpolate', ['linear'], ['zoom'], 10, 0.25, 12.5, 0.55] },
+    paint: { 'fill-color': statusColor, 'fill-opacity': CORRIDOR_FILL },
   }, firstLabel);
   map.addLayer({
     id: 'corridors-line', type: 'line', source: 'corridors',
     paint: {
       'line-color': statusColor,
       'line-width': ['interpolate', ['linear'], ['zoom'], 9, 1.2, 12, 2.5, 15, 1],
-      'line-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.5, 12, 0.75, 15, 0.4],
+      'line-opacity': CORRIDOR_LINE,
     },
   }, firstLabel);
 
@@ -181,7 +196,27 @@ mapReady.then(() => {
   map.addLayer({ id: 'radius-fill', type: 'fill', source: 'radius', paint: { 'fill-color': '#00664f', 'fill-opacity': 0.07 } }, firstLabel);
   map.addLayer({ id: 'radius-line', type: 'line', source: 'radius', paint: { 'line-color': '#00664f', 'line-width': 1.6, 'line-dasharray': [3, 2.5] } }, firstLabel);
 
+  // A drive. The route lies under the camera stretches. The parts of it that run along
+  // a stretch lie over them, in the color of that camera's status.
+  const round = { 'line-cap': 'round', 'line-join': 'round' };
+  for (const id of ['trip-alt', 'trip', 'trip-hits']) {
+    map.addSource(id, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  }
+  map.addLayer({ id: 'trip-alt-line', type: 'line', source: 'trip-alt', layout: round, paint: { 'line-color': '#7d868e', 'line-width': 5, 'line-opacity': 0.7 } }, 'corridors');
+  map.addLayer({ id: 'trip-case', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9 } }, 'corridors');
+  map.addLayer({ id: 'trip-line', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#00664f', 'line-width': 5 } }, 'corridors');
+  map.addLayer({ id: 'trip-hits-case', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 12 } }, firstLabel);
+  map.addLayer({ id: 'trip-hits-line', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': statusColor, 'line-width': 8 } }, firstLabel);
+  // A press on the other route picks it.
+  map.on('click', 'trip-alt-line', (e) => {
+    const i = e.features?.[0]?.properties?.i;
+    if (i != null) pickRoute(Number(i));
+  });
+  map.on('mouseenter', 'trip-alt-line', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'trip-alt-line', () => { map.getCanvas().style.cursor = ''; });
+
   drawRadius();
+  drawTrip();
 });
 
 // A blocked or broken tile host would leave a silent blank map. Say so instead.
@@ -198,7 +233,12 @@ function loneCamera() {
   return closest && closest.dist > state.radius ? closest : null;
 }
 
-const isNear = (cam, lone) => state.origin != null && (cam.dist <= state.radius || cam === lone);
+let tripOids = new Set(); // the cameras on the picked route
+
+/** A camera to show as a sign: in the search circle, or on the drive. */
+const isNear = (cam, lone) => (state.mode === 'trip'
+  ? tripOids.has(cam.oid)
+  : state.origin != null && (cam.dist <= state.radius || cam === lone));
 
 function limitWords(cam) {
   if (cam.limit == null) return '';
@@ -289,6 +329,7 @@ function drawOrigin() {
 
 /** Fit the search circle, plus the closest camera when the circle is empty. */
 function frameResults() {
+  if (state.mode === 'trip') { frameTrip(); return; }
   const o = state.origin;
   const closest = o ? ranked()[0] : null;
   if (!o || (closest && closest.dist > FAR_MILES)) {
@@ -407,9 +448,10 @@ function chipHTML(cam) {
   return `<span class="chip" data-status="${st.key}">${esc(st.label)}</span>`;
 }
 
-function rowHTML(cam) {
+/** One camera in a list. `side` replaces the distance from the address. */
+function rowHTML(cam, side = null) {
   const st = statusOf(cam.status);
-  const dist = Number.isFinite(cam.dist) ? `<span class="dist">${formatMiles(cam.dist)}</span>` : '';
+  const dist = side ?? (Number.isFinite(cam.dist) ? `<span class="dist">${formatMiles(cam.dist)}</span>` : '');
   // The chip hides on a narrow panel, so screen readers get the status as text.
   return `<li><button type="button" class="row" data-oid="${esc(cam.oid)}">
     ${signHTML(cam, 'row')}
@@ -433,7 +475,11 @@ function overviewHTML() {
   const byStreet = [...state.cameras].sort((a, b) => a.street.localeCompare(b.street) || a.from.localeCompare(b.from));
   return `
     <h1>Speed cameras in Los Angeles</h1>
-    <p class="lede">${lede} Enter an address to count the cameras near it.</p>
+    <p class="lede">${lede} Enter an address to count the cameras near it. Or map a drive, such as your commute, to see the cameras on the way.</p>
+    <button type="button" class="btn" data-trip>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21v-8a4 4 0 0 1 4-4h9"/><path d="m15 4.5 4.5 4.5-4.5 4.5"/></svg>
+      Map a drive
+    </button>
     ${mapNotice()}
     <ul class="legend">
       ${tally(state.cameras).map(({ st, n }) => `<li data-status="${st.key}">
@@ -444,7 +490,7 @@ function overviewHTML() {
     </ul>
     <details class="fold all" ${state.allOpen ? 'open' : ''}>
       <summary>All ${total} cameras, by street</summary>
-      <ol class="cams">${byStreet.map(rowHTML).join('')}</ol>
+      <ol class="cams">${byStreet.map((cam) => rowHTML(cam)).join('')}</ol>
     </details>`;
 }
 
@@ -482,8 +528,8 @@ function resultsHTML() {
     <div class="seg" role="radiogroup" aria-label="Distance from the ${place}">
       ${RADII.map((r) => `<button type="button" role="radio" aria-checked="${r === state.radius}" tabindex="${r === state.radius ? 0 : -1}" data-radius="${r}">${plural(r, 'mile')}</button>`).join('')}
     </div>
-    ${near.length ? `<h2>Within ${span}</h2><ol class="cams">${near.map(rowHTML).join('')}</ol>` : ''}
-    ${rest.length ? `<h2>${near.length ? 'Next closest' : 'Closest cameras'}</h2><ol class="cams">${rest.map(rowHTML).join('')}</ol>` : ''}`;
+    ${near.length ? `<h2>Within ${span}</h2><ol class="cams">${near.map((cam) => rowHTML(cam)).join('')}</ol>` : ''}
+    ${rest.length ? `<h2>${near.length ? 'Next closest' : 'Closest cameras'}</h2><ol class="cams">${rest.map((cam) => rowHTML(cam)).join('')}</ol>` : ''}`;
 }
 
 function detailHTML(cam) {
@@ -501,6 +547,19 @@ function detailHTML(cam) {
     facts.push([state.origin.kind === 'gps' ? 'From you' : 'From the address',
       `${formatMiles(cam.dist)}<small>To the nearest part of this stretch</small>`]);
   }
+  if (state.mode === 'trip') {
+    const route = state.trip.routes[state.trip.pick];
+    const hit = route?.hits.find((h) => h.oid === cam.oid);
+    if (hit) {
+      const at = tripMiles(hit.at);
+      facts.push(['On this drive', `${at.charAt(0).toUpperCase()}${at.slice(1)}<small>${hit.line.length
+        ? `The route runs along this stretch for about ${formatMiles(hit.miles)}` : 'The route passes this camera'}</small>`]);
+    } else if (route?.crossed.some((h) => h.oid === cam.oid)) {
+      facts.push(['On this drive', 'Not counted<small>The route only crosses this street</small>']);
+    } else if (route) {
+      facts.push(['On this drive', 'Not on this route']);
+    }
+  }
   if (cam.school != null) facts.push(['School nearby', cam.school ? 'Yes' : 'No']);
   if (cam.district != null) facts.push(['Council district', esc(cam.district)]);
   const lat = Number(cam.lat);
@@ -508,7 +567,7 @@ function detailHTML(cam) {
   return `
     <button type="button" class="back" data-back>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5-6 6.5 6 6.5"/></svg>
-      ${state.origin ? 'All results' : 'All cameras'}
+      ${state.mode === 'trip' ? 'Back to the drive' : state.origin ? 'All results' : 'All cameras'}
     </button>
     <div class="detail">
       ${signHTML(cam, 'big')}
@@ -542,12 +601,14 @@ function renderFoot() {
       </table>
       <p>The ticket goes by mail to the car's owner. It adds no point to a license. A car's first notice for 11 to 15 mph over is a warning.</p>
     </details>
-    <p class="source">${source} A distance goes to the nearest part of the street a camera watches. This is not a city website. Address search by Los Angeles County and OpenStreetMap.</p>`;
+    <p class="source">${source} A distance goes to the nearest part of the street a camera watches. A drive counts a camera when the route runs along the street it watches. Drive times are without traffic. This is not a city website. Address search by Los Angeles County and OpenStreetMap. Routes by Valhalla, or by OSRM when it is down, on OpenStreetMap data (openstreetmap.de): the start and the end of a drive go to that service.</p>`;
 }
 
 function render() {
   const cam = state.selected != null && state.cameras.find((c) => c.oid === state.selected);
-  el.view.innerHTML = cam ? detailHTML(cam) : state.origin ? resultsHTML() : overviewHTML();
+  el.view.innerHTML = cam ? detailHTML(cam)
+    : state.mode === 'trip' ? tripHTML()
+      : state.origin ? resultsHTML() : overviewHTML();
   el.body.scrollTop = 0;
 }
 
@@ -569,15 +630,25 @@ el.view.addEventListener('click', (e) => {
   }
   const seg = e.target.closest('[data-radius]');
   if (seg) { setRadius(Number(seg.dataset.radius)); return; }
+  const route = e.target.closest('[data-route]');
+  if (route) { pickRoute(Number(route.dataset.route)); return; }
+  if (e.target.closest('[data-trip]')) { openTrip(); return; }
+  if (e.target.closest('[data-retry]')) { planTrip(); return; }
   if (e.target.closest('[data-back]')) select(null);
 });
 
-// Arrow keys move through the distance choices, from the one that has focus.
+// Arrow keys move through the distance choices or the routes, from the one that has focus.
 el.view.addEventListener('keydown', (e) => {
   const seg = e.target.closest?.('[data-radius]');
+  const route = e.target.closest?.('[data-route]');
   const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
-  if (!seg || !step) return;
+  if (!step || (!seg && !route)) return;
   e.preventDefault();
+  if (route) {
+    const n = state.trip.routes.length;
+    pickRoute((Number(route.dataset.route) + step + n) % n);
+    return;
+  }
   const i = RADII.indexOf(Number(seg.dataset.radius));
   setRadius(RADII[(i + step + RADII.length) % RADII.length]);
 });
@@ -659,7 +730,7 @@ addEventListener('resize', () => {
   resizeTimer = setTimeout(() => {
     map.resize();
     const cam = state.selected != null && state.cameras.find((c) => c.oid === state.selected);
-    const typing = document.activeElement === el.input; // a phone keyboard also resizes the window
+    const typing = inputs.includes(document.activeElement); // a phone keyboard also resizes the window
     if (cam) focusCamera(cam, { instant: true });
     else if (!handMoved && !typing) frameResults();
   }, 150);
@@ -676,10 +747,19 @@ const NOTES = {
   place: 'That address did not load. Try again in a moment.',
 };
 
+// Three fields share one suggestion list: the address, and the two ends of a drive.
+const inputs = [el.input, el.from, el.to];
+let field = el.input; // the field the list belongs to
 let places = [];
 let active = -1;
 let lookupTimer = 0;
-let ticket = 0; // guards a new origin: a newer action wins over an older answer
+// Guards a new place: a newer action on a field wins over an older answer for that field.
+const tickets = new Map(inputs.map((input) => [input, 0]));
+const bump = (input) => {
+  tickets.set(input, tickets.get(input) + 1);
+  return tickets.get(input);
+};
+const current = (input, mine) => tickets.get(input) === mine;
 let listTicket = 0; // guards the suggestion list: a closed list stays closed
 
 // Show a busy sign when an answer takes more than a moment.
@@ -756,8 +836,10 @@ async function locate(place) {
 function closeSuggest() {
   el.suggest.hidden = true;
   el.suggest.innerHTML = '';
-  el.input.setAttribute('aria-expanded', 'false');
-  el.input.removeAttribute('aria-activedescendant');
+  for (const input of inputs) {
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+  }
   active = -1;
 }
 
@@ -772,12 +854,12 @@ function dismiss() {
 function showPlaces(list, note = '') {
   places = list;
   active = -1;
-  el.input.removeAttribute('aria-activedescendant');
+  field.removeAttribute('aria-activedescendant');
   const rows = list.map((p, i) => `<li role="option" id="place-${i}" data-i="${i}" aria-selected="false">
     <strong>${esc(p.title)}</strong>${p.sub ? `<span>${esc(p.sub)}</span>` : ''}</li>`).join('');
   el.suggest.innerHTML = (note ? `<li class="suggest__note" role="presentation">${esc(note)}</li>` : '') + rows;
   el.suggest.hidden = false;
-  el.input.setAttribute('aria-expanded', String(list.length > 0));
+  field.setAttribute('aria-expanded', String(list.length > 0));
   const count = `${list.length} ${list.length === 1 ? 'address' : 'addresses'} found. Use the arrow keys to pick one.`;
   announce(note && list.length ? `${note} ${count}` : note || count);
 }
@@ -789,8 +871,8 @@ function setActive(i) {
     li.setAttribute('aria-selected', String(on));
     if (on) li.scrollIntoView({ block: 'nearest' });
   }
-  if (i >= 0) el.input.setAttribute('aria-activedescendant', `place-${i}`);
-  else el.input.removeAttribute('aria-activedescendant');
+  if (i >= 0) field.setAttribute('aria-activedescendant', `place-${i}`);
+  else field.removeAttribute('aria-activedescendant');
 }
 
 /** Type-ahead: fetch and show suggestions for the text typed so far. */
@@ -808,77 +890,100 @@ async function lookup(q) {
   }
 }
 
-/** Use this place as the address. */
+/** A place is set for a field: the address, or one end of a drive. */
+function usePlace(input, spot) {
+  if (input === el.input) setOrigin(spot);
+  else setEnd(input === el.from ? 'from' : 'to', spot);
+}
+
+/** Use this place for the field the list belongs to. */
 async function choose(place) {
-  el.input.value = place.label;
-  el.clear.hidden = false;
+  const input = field;
+  input.value = place.label;
+  if (input === el.input) el.clear.hidden = false;
   dismiss();
-  el.input.blur();
-  const mine = ++ticket;
+  input.blur();
+  const mine = bump(input);
   const done = busy();
   let found;
   try {
     found = await locate(place);
   } catch {
-    if (mine === ticket) showPlaces([], NOTES.place);
+    if (current(input, mine)) { field = input; showPlaces([], NOTES.place); }
     return;
   } finally {
     done();
   }
-  if (mine !== ticket) return; // a newer action took over
-  setOrigin({ lat: found.lat, lon: found.lon, label: place.label, kind: 'address' });
+  if (!current(input, mine)) return; // a newer action took over
+  usePlace(input, { lat: found.lat, lon: found.lon, label: place.label, kind: 'address' });
 }
 
-el.input.addEventListener('input', () => {
-  // Any edit cancels an answer that is still on its way and drops the old list.
-  ticket += 1;
-  listTicket += 1;
-  places = [];
-  setActive(-1);
-  el.clear.hidden = !el.input.value;
-  clearTimeout(lookupTimer);
-  const q = el.input.value.trim();
-  if (q.length < 3) { closeSuggest(); return; }
-  lookupTimer = setTimeout(() => lookup(q), 240);
-});
+for (const input of inputs) {
+  input.addEventListener('input', () => {
+    // Any edit cancels an answer that is still on its way and drops the old list.
+    field = input;
+    bump(input);
+    listTicket += 1;
+    places = [];
+    setActive(-1);
+    if (input === el.input) el.clear.hidden = !input.value;
+    clearTimeout(lookupTimer);
+    const q = input.value.trim();
+    if (!q && input !== el.input) clearEnd(input === el.from ? 'from' : 'to');
+    if (q.length < 3) { closeSuggest(); return; }
+    lookupTimer = setTimeout(() => lookup(q), 240);
+  });
 
-el.input.addEventListener('focus', () => {
-  if (phone.matches) setSheet('peek');
-});
+  input.addEventListener('focus', () => {
+    if (field !== input) dismiss(); // the open list belongs to another field
+    field = input;
+    if (phone.matches) setSheet('peek');
+    if (input !== el.input) input.select(); // typing replaces an end of the drive
+  });
 
-el.input.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' || e.key === 'Tab') { dismiss(); return; }
-  if (el.suggest.hidden || !places.length) return;
-  if (e.key === 'ArrowDown') { e.preventDefault(); setActive((active + 1) % places.length); }
-  if (e.key === 'ArrowUp') { e.preventDefault(); setActive(active <= 0 ? places.length - 1 : active - 1); }
-});
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'Tab') { dismiss(); return; }
+    // A form with more than one text field does not submit on Enter by itself.
+    if (e.key === 'Enter') { e.preventDefault(); submitField(input); return; }
+    if (el.suggest.hidden || !places.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((active + 1) % places.length); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); setActive(active <= 0 ? places.length - 1 : active - 1); }
+  });
+}
 
-// Enter with nothing picked. Take one strong match. Else show the choices: never guess.
-el.search.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const q = el.input.value.trim();
+/** Enter in a field. With nothing picked, take one strong match. Else show the choices: never guess. */
+async function submitField(input) {
+  field = input;
+  const q = input.value.trim();
   if (!q) return;
   if (active >= 0 && places[active]) { choose(places[active]); return; }
   clearTimeout(lookupTimer);
   listTicket += 1;
   if (q.length < 3 || !/[a-z0-9]/i.test(q)) { showPlaces([], NOTES.none); return; }
-  const mine = ++ticket;
+  const mine = bump(input);
   const done = busy();
   try {
     const exact = decideOnEnter(q, await countyCandidates(q).catch(() => []));
-    if (mine !== ticket) return;
+    if (!current(input, mine)) return;
+    field = input;
     if (exact?.pick) { choose(exact.pick); return; }
     if (exact?.choices) { showPlaces(exact.choices, NOTES.many); return; }
     const found = await geocode(q);
-    if (mine !== ticket) return;
+    if (!current(input, mine)) return;
+    field = input;
     const next = decideFromSuggestions(q, found.places);
     if (next.pick) { choose(next.pick); return; }
     showPlaces(next.choices, next.reason === 'none' && found.limited ? NOTES.limited : NOTES[next.reason]);
   } catch {
-    if (mine === ticket) showPlaces([], NOTES.down);
+    if (current(input, mine)) { field = input; showPlaces([], NOTES.down); }
   } finally {
     done();
   }
+}
+
+el.search.addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitField(field);
 });
 
 // Choose on the click, so a press that slides off the option is cancelled.
@@ -895,7 +1000,7 @@ document.addEventListener('pointerdown', (e) => {
 });
 
 el.clear.addEventListener('click', () => {
-  ticket += 1;
+  bump(el.input);
   places = [];
   el.input.value = '';
   el.clear.hidden = true;
@@ -906,30 +1011,357 @@ el.clear.addEventListener('click', () => {
   announce('Address cleared.');
 });
 
-el.locate.addEventListener('click', () => {
+/** Fill a field with the device's position. */
+function useMyLocation(input, button) {
   dismiss();
+  field = input;
   if (!navigator.geolocation) {
     showPlaces([], 'This browser does not share location. Type an address.');
     return;
   }
-  const mine = ++ticket;
+  const mine = bump(input);
   const done = busy();
-  el.locate.classList.add('is-busy');
-  const finish = () => { done(); el.locate.classList.remove('is-busy'); };
+  button.classList.add('is-busy');
+  const finish = () => { done(); button.classList.remove('is-busy'); };
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       finish();
-      if (mine !== ticket) return; // an address was picked, typed or cleared while this waited
-      el.input.value = 'Your location';
-      el.clear.hidden = false;
-      setOrigin({ lat: pos.coords.latitude, lon: pos.coords.longitude, label: 'Your location', kind: 'gps' });
+      if (!current(input, mine)) return; // an address was picked, typed or cleared while this waited
+      input.value = 'Your location';
+      if (input === el.input) el.clear.hidden = false;
+      usePlace(input, { lat: pos.coords.latitude, lon: pos.coords.longitude, label: 'Your location', kind: 'gps' });
     },
     () => {
       finish();
-      if (mine === ticket) showPlaces([], 'Location is off for this page. Type an address.');
+      if (current(input, mine)) { field = input; showPlaces([], 'Location is off for this page. Type an address.'); }
     },
     { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 },
   );
+}
+
+el.locate.addEventListener('click', () => useMyLocation(el.input, el.locate));
+el.locateFrom.addEventListener('click', () => useMyLocation(el.from, el.locateFrom));
+
+/* ---------- A drive ---------- */
+
+const ROUTE_NAMES = { fast: 'Fastest route', streets: 'Route that avoids freeways' };
+const tripMiles = (at) => (at < 0.05 ? 'at the start' : `at ${at < 10 ? at.toFixed(1) : Math.round(at)} mi`);
+const spotName = (spot) => (spot.kind === 'gps' ? 'your location' : spot.label);
+/** A route with the cameras on it. */
+const scored = (route) => ({ ...route, ...camerasOnRoute(route.coords, state.cameras, corridorOf) });
+
+/** "15.9 mi, about 20 min without traffic. Via I 10 West and CA 110 South." */
+function routeFacts(route) {
+  const length = `${route.miles < 10 ? route.miles.toFixed(1) : Math.round(route.miles)} mi`;
+  const time = route.minutes == null ? '' : `, about ${formatMinutes(route.minutes)} without traffic`;
+  return `${length}${time}.${route.via ? ` Via ${esc(route.via)}.` : ''}`;
+}
+
+/** Ask Valhalla for one route. Null when it answers that no road goes there. */
+async function valhallaRoute(from, to, auto) {
+  const body = {
+    locations: [from, to].map(({ lat, lon }) => ({ lat: Number(lat.toFixed(5)), lon: Number(lon.toFixed(5)) })),
+    costing: 'auto', costing_options: { auto }, units: 'miles',
+  };
+  // A POST keeps the two places out of the web address. Plain text needs no extra CORS request.
+  const res = await fetch(VALHALLA, {
+    method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body), signal: AbortSignal.timeout(12000),
+  });
+  const data = await res.json().catch(() => null);
+  if (data?.trip) return routeFromValhalla(data.trip);
+  if (res.status === 400 && data?.error_code) return null;
+  throw new Error(`Route service: ${res.status}`);
+}
+
+async function osrmRoute(from, to) {
+  const pair = [from, to].map(({ lat, lon }) => `${lon.toFixed(5)},${lat.toFixed(5)}`).join(';');
+  const data = await getJSON(`${OSRM}/${pair}?overview=full&geometries=geojson&steps=true`, 12000);
+  return routeFromOsrm(data.routes?.[0]);
+}
+
+/**
+ * The fastest route, and the route that avoids freeways when it differs.
+ * A freeway passes no camera, so the fastest route alone could read "0 cameras"
+ * for someone who drives the same trip on city streets.
+ * `partial` is true when one of the two did not load. Throws when no service answers.
+ */
+async function fetchRoutes(from, to) {
+  const [fast, streets] = await Promise.allSettled([
+    valhallaRoute(from, to, {}), valhallaRoute(from, to, { use_highways: 0 }),
+  ]);
+  if (fast.status === 'rejected' && streets.status === 'rejected') {
+    const route = await osrmRoute(from, to);
+    return { routes: route ? [{ ...route, kind: 'fast' }] : [], partial: true };
+  }
+  const routes = [];
+  if (fast.value) routes.push({ ...fast.value, kind: 'fast' });
+  if (streets.value && !(routes[0] && sameRoute(routes[0], streets.value))) routes.push({ ...streets.value, kind: 'streets' });
+  return { routes, partial: fast.status === 'rejected' || streets.status === 'rejected' };
+}
+
+const tripPins = [];
+
+/** Draw the drive on the map: the two ends, the routes, and the parts on a camera stretch. */
+function drawTrip() {
+  for (const pin of tripPins.splice(0)) pin.remove();
+  const t = state.trip;
+  const picked = t.routes[t.pick];
+  tripOids = new Set((picked?.hits ?? []).map((h) => h.oid));
+  if (state.mode === 'trip') {
+    for (const [end, letter, word] of [['from', 'A', 'Start'], ['to', 'B', 'End']]) {
+      const spot = t[end];
+      if (!spot) continue;
+      const node = document.createElement('div');
+      node.className = 'pin pin--end';
+      node.dataset.end = end;
+      node.textContent = letter;
+      node.setAttribute('role', 'img');
+      node.setAttribute('aria-label', `${word} of the drive: ${spot.label}`);
+      tripPins.push(new Marker({ element: node }).setLngLat([spot.lon, spot.lat]).addTo(map));
+    }
+  }
+  // While a route shows, the cameras off it fade, so the map agrees with the count.
+  el.root.classList.toggle('has-route', Boolean(picked));
+  if (!map.getSource('trip')) return; // the map style is not in yet: it draws the drive when it is
+  map.setPaintProperty('corridors', 'fill-opacity', picked ? 0.12 : CORRIDOR_FILL);
+  map.setPaintProperty('corridors-line', 'line-opacity', picked ? 0.22 : CORRIDOR_LINE);
+  const all = (features) => ({ type: 'FeatureCollection', features });
+  const line = (coordinates, properties = {}) => ({ type: 'Feature', properties, geometry: { type: 'LineString', coordinates } });
+  const byOid = new Map(state.cameras.map((c) => [c.oid, c]));
+  map.getSource('trip').setData(all(picked ? [line(picked.coords)] : []));
+  map.getSource('trip-alt').setData(all(t.routes.flatMap((r, i) => (i === t.pick ? [] : [line(r.coords, { i })]))));
+  map.getSource('trip-hits').setData(all((picked?.hits ?? [])
+    .filter((h) => h.line.length > 1 && byOid.has(h.oid))
+    .map((h) => line(h.line, { status: statusOf(byOid.get(h.oid).status).key }))));
+}
+
+/** Fit the picked route, or the ends entered so far. */
+function frameTrip() {
+  const t = state.trip;
+  const picked = t.routes[t.pick];
+  const pts = picked ? picked.coords : [t.from, t.to].filter(Boolean).map((spot) => [spot.lon, spot.lat]);
+  if (!pts.length) {
+    map.fitBounds(cityBounds, move({ padding: mapPadding(), duration: 900 }));
+    return;
+  }
+  const box = pts.reduce((b, pt) => b.extend(pt), new LngLatBounds());
+  map.fitBounds(box, move({ padding: mapPadding(), maxZoom: 14.5, duration: 1100 }));
+}
+
+function tripSummary() {
+  const t = state.trip;
+  if (t.phase === 'failed') return 'The route did not load.';
+  if (t.phase === 'none') return 'No driving route found.';
+  if (t.phase !== 'ready') return '';
+  const route = t.routes[t.pick];
+  return `${plural(route.hits.length, 'camera')} on this route.${t.routes.length > 1 ? ` ${ROUTE_NAMES[route.kind]}.` : ''}`;
+}
+
+function tripHTML() {
+  const t = state.trip;
+  const ends = t.from && t.to ? `${esc(spotName(t.from))} to ${esc(spotName(t.to))}` : '';
+  if (t.phase === 'loading') {
+    return `<h1>Finding the route</h1><p class="lede">From ${ends}.</p>${mapNotice()}`;
+  }
+  if (t.phase === 'failed') {
+    return `<h1>The route did not load</h1>
+      <p class="lede">The route service did not answer. Check the connection, then try again.</p>
+      <button type="button" class="btn" data-retry>Try again</button>`;
+  }
+  if (t.phase === 'none') {
+    return `<h1>No driving route</h1><p class="lede">The route service found no way to drive from ${ends}.</p>${mapNotice()}`;
+  }
+  if (t.phase !== 'ready') {
+    const next = t.from ? 'Now enter where the drive ends.'
+      : t.to ? 'Now enter where the drive starts.'
+        : 'Enter where the drive starts and where it ends.';
+    return `<h1>Cameras on a drive</h1><p class="lede">${next} The map then counts the cameras on the way.</p>${mapNotice()}`;
+  }
+
+  const route = t.routes[t.pick];
+  const byOid = new Map(state.cameras.map((c) => [c.oid, c]));
+  const hits = route.hits.filter((h) => byOid.has(h.oid));
+  const crossed = route.crossed.filter((h) => byOid.has(h.oid));
+  const n = hits.length;
+
+  let mix;
+  if (n) {
+    mix = tally(hits.map((h) => byOid.get(h.oid))).map(({ st, n: k }) => `${esc(st.tally(k))}.`).join(' ');
+    mix = mix.charAt(0).toUpperCase() + mix.slice(1);
+  } else {
+    mix = 'This route runs along no street with a camera.';
+    const other = t.routes.find((r) => r !== route && r.hits.length);
+    if (other) mix += ` The ${ROUTE_NAMES[other.kind].toLowerCase()} passes ${plural(other.hits.length, 'camera')}.`;
+  }
+
+  let notice = '';
+  if (t.partial && t.routes.length === 1) {
+    notice = route.kind === 'fast'
+      ? '<p class="notice">The route that avoids freeways did not load. A drive on city streets can pass more cameras.</p>'
+      : '<p class="notice">The fastest route did not load. This is the route that avoids freeways.</p>';
+  }
+
+  const chooser = t.routes.length > 1
+    ? `<div class="routes" role="radiogroup" aria-label="Route">${t.routes.map((r, i) => `
+        <button type="button" role="radio" aria-checked="${i === t.pick}" tabindex="${i === t.pick ? 0 : -1}" data-route="${i}">
+          <span class="routes__n" aria-hidden="true">${r.hits.length}<small>${r.hits.length === 1 ? 'camera' : 'cameras'}</small></span>
+          <span><strong>${ROUTE_NAMES[r.kind]}</strong><span class="sr">${plural(r.hits.length, 'camera')}.</span><small>${routeFacts(r)}</small></span>
+        </button>`).join('')}</div>`
+    : `<p class="trip__sum">${routeFacts(route)}</p>`;
+
+  const row = (h) => rowHTML(byOid.get(h.oid), `<span class="dist">${tripMiles(h.at)}</span>`);
+  const those = crossed.length === 1 ? ['this street', 'it'] : ['these streets', 'them'];
+
+  return `
+    <h1 class="count">
+      <span class="count__n">${n}</span>
+      <span class="count__what">${n === 1 ? 'camera' : 'cameras'} on this route <small>${ends.charAt(0).toUpperCase()}${ends.slice(1)}</small></span>
+    </h1>
+    <p class="mix">${mix}</p>
+    ${notice}${mapNotice()}
+    ${chooser}
+    ${n ? `<h2>On the way, in driving order</h2><ol class="cams">${hits.map(row).join('')}</ol>` : ''}
+    ${crossed.length ? `<details class="fold crossed">
+      <summary>${plural(crossed.length, 'camera street')} the route only crosses</summary>
+      <p>A camera watches the traffic on its own street. The route cuts across ${those[0]}, or passes over ${those[1]} on a freeway, so ${crossed.length === 1 ? 'its camera does' : 'their cameras do'} not count.</p>
+      <ol class="cams">${crossed.map(row).join('')}</ol>
+    </details>` : ''}`;
+}
+
+let tripTicket = 0; // guards the route: a swap, a new end or a closed drive drops an older answer
+
+/** Find the routes for the two ends, count their cameras and show them. */
+async function planTrip() {
+  const t = state.trip;
+  const mine = ++tripTicket;
+  state.selected = null;
+  t.routes = [];
+  t.pick = 0;
+  t.partial = false;
+  const show = () => {
+    drawTrip();
+    syncMarkers();
+    render();
+    handMoved = false;
+    frameResults();
+  };
+  if (!t.from || !t.to) {
+    t.phase = 'idle';
+    show();
+    return;
+  }
+  t.phase = 'loading';
+  show();
+  const done = busy();
+  let found = null;
+  try { found = await fetchRoutes(t.from, t.to); } catch { /* no route service answered */ } finally { done(); }
+  if (mine !== tripTicket) return;
+  if (!found) t.phase = 'failed';
+  else if (!found.routes.length) t.phase = 'none';
+  else {
+    t.routes = found.routes.map(scored);
+    t.partial = found.partial;
+    t.phase = 'ready';
+  }
+  setSheet('half');
+  show();
+  if (!inputs.includes(document.activeElement)) focusHeading();
+  announce(tripSummary());
+}
+
+function setEnd(which, spot) {
+  state.trip[which] = spot;
+  planTrip();
+  const other = which === 'from' ? 'to' : 'from';
+  if (!state.trip[other] && !phone.matches) el[other].focus();
+}
+
+/** The field for one end was emptied: drop that end and its routes. */
+function clearEnd(which) {
+  if (!state.trip[which]) return;
+  state.trip[which] = null;
+  planTrip();
+}
+
+function pickRoute(i) {
+  const t = state.trip;
+  if (!t.routes[i] || i === t.pick) return;
+  t.pick = i;
+  state.selected = null;
+  drawTrip();
+  syncMarkers();
+  render();
+  handMoved = false;
+  frameResults();
+  el.view.querySelector('.routes [aria-checked="true"]')?.focus();
+  announce(tripSummary());
+}
+
+/** The cameras changed at LADOT: count the routes again. */
+function rescoreTrip() {
+  state.trip.routes = state.trip.routes.map(scored);
+  drawTrip();
+}
+
+/** Switch the search bar between one address and the two ends of a drive. */
+function showMode() {
+  const trip = state.mode === 'trip';
+  el.near.hidden = trip;
+  el.trip.hidden = !trip;
+  dismiss();
+  setSheet(state.sheet); // the search bar changed height
+}
+
+function openTrip() {
+  if (state.mode === 'trip') return;
+  for (const input of inputs) bump(input);
+  const start = state.origin ? { lat: state.origin.lat, lon: state.origin.lon, label: state.origin.label, kind: state.origin.kind } : null;
+  state.mode = 'trip';
+  state.trip = { ...newTrip(), from: start };
+  state.origin = null;
+  el.from.value = start?.label ?? '';
+  el.to.value = '';
+  measure();
+  drawOrigin();
+  showMode();
+  planTrip();
+  setSheet('peek');
+  (start ? el.to : el.from).focus();
+  announce(start ? 'Enter where the drive ends.' : 'Enter where the drive starts and where it ends.');
+}
+
+function closeTrip() {
+  if (state.mode !== 'trip') return;
+  for (const input of inputs) bump(input);
+  tripTicket += 1;
+  const back = state.trip.from;
+  state.mode = 'near';
+  state.trip = newTrip();
+  el.from.value = '';
+  el.to.value = '';
+  el.input.value = back?.label ?? '';
+  el.clear.hidden = !back;
+  showMode();
+  drawTrip();
+  setOrigin(back); // with a start, this shows and announces the cameras near it
+  if (!back) {
+    el.openTrip.focus();
+    announce('Drive closed.');
+  }
+}
+
+el.openTrip.addEventListener('click', openTrip);
+el.closeTrip.addEventListener('click', closeTrip);
+
+el.swap.addEventListener('click', () => {
+  const t = state.trip;
+  bump(el.from);
+  bump(el.to);
+  [t.from, t.to] = [t.to, t.from];
+  [el.from.value, el.to.value] = [el.to.value, el.from.value];
+  dismiss();
+  planTrip();
+  announce('Start and end swapped.');
 });
 
 /* ---------- Start ---------- */
@@ -950,6 +1382,7 @@ refreshFromLadot()
     if (!changed) return;
     // Something changed at LADOT. Redraw, and keep the reader's place.
     measure();
+    rescoreTrip();
     syncMarkers();
     rerender();
     await mapReady;
