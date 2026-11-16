@@ -39,6 +39,8 @@ npm test
 
 The browser suite fakes every outside host (`tests/e2e/mocks.js`), so it needs no network. It starts its own server on port 4174.
 
+GitHub Actions runs the same four suites on each push (`.github/workflows/tests.yml`).
+
 ## Where the data comes from
 
 | What | Source |

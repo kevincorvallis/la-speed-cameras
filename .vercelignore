@@ -10,4 +10,5 @@ package-lock.json
 playwright.config.js
 README.md
 .claude
+.github
 vendor/.claude
