@@ -6,6 +6,7 @@ import {
   cleanQuery, placeFromText, placeFromPhoton, placeFromCandidate, looksLike, mergeSuggestions,
   decideOnEnter, decideFromSuggestions, mergeLive, signature, layoutSigns, snapFor,
   camerasOnRoute, routeFromValhalla, routeFromOsrm, sameRoute, formatMinutes,
+  formatParams, parseParams,
 } from './lib.js';
 
 const LADOT_LAYER = 'https://services.arcgis.com/G3nmNsarwQblLhip/arcgis/rest/services/CameraSystems_streetnames2/FeatureServer/0';
@@ -41,7 +42,8 @@ const el = {
   suggest: $('#suggest'), panel: $('#panel'), grip: $('#grip'), body: $('#body'),
   view: $('#view'), foot: $('#foot'), status: $('#status'),
   near: $('#near'), trip: $('#trip'), from: $('#from'), to: $('#to'), openTrip: $('#open-trip'),
-  closeTrip: $('#close-trip'), swap: $('#swap'), locateFrom: $('#locate-from'),
+  closeTrip: $('#close-trip'), clearFrom: $('#clear-from'), clearTo: $('#clear-to'),
+  swap: $('#swap'), locateFrom: $('#locate-from'),
 };
 
 /** A drive with nothing entered yet. Each route: { kind, coords, miles, minutes, via, hits, crossed }. */
@@ -58,9 +60,19 @@ const state = {
   sheet: 'peek',
   mapDown: false,
   allOpen: false, // the "All cameras" list on the overview
+  crossedOpen: false, // the "streets the route only crosses" list in a drive
   listScroll: 0, // where the list was before a camera opened
   returnTo: 'list', // what opened the camera: 'list' or 'map'
 };
+
+let readyForURL = false;
+function syncURL() {
+  if (!readyForURL) return;
+  const next = `${location.pathname}${formatParams(state)}`;
+  if (next !== `${location.pathname}${location.search}`) {
+    history.replaceState(null, '', next);
+  }
+}
 
 let handMoved = false; // the person moved the map by hand since the last search
 
@@ -203,17 +215,22 @@ mapReady.then(() => {
     map.addSource(id, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   }
   map.addLayer({ id: 'trip-alt-line', type: 'line', source: 'trip-alt', layout: round, paint: { 'line-color': '#7d868e', 'line-width': 5, 'line-opacity': 0.7 } }, 'corridors');
+  map.addLayer({ id: 'trip-alt-hit', type: 'line', source: 'trip-alt', layout: round, paint: { 'line-width': 16, 'line-opacity': 0 } }, 'corridors');
   map.addLayer({ id: 'trip-case', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9 } }, 'corridors');
   map.addLayer({ id: 'trip-line', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#00664f', 'line-width': 5 } }, 'corridors');
   map.addLayer({ id: 'trip-hits-case', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 12 } }, firstLabel);
   map.addLayer({ id: 'trip-hits-line', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': statusColor, 'line-width': 8 } }, firstLabel);
-  // A press on the other route picks it.
-  map.on('click', 'trip-alt-line', (e) => {
+  // A press on the other route picks it, unless the point also sits on the active route.
+  map.on('click', 'trip-alt-hit', (e) => {
+    if (map.queryRenderedFeatures(e.point, { layers: ['trip-line'] }).length) return;
     const i = e.features?.[0]?.properties?.i;
     if (i != null) pickRoute(Number(i));
   });
-  map.on('mouseenter', 'trip-alt-line', () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'trip-alt-line', () => { map.getCanvas().style.cursor = ''; });
+  map.on('mousemove', 'trip-alt-hit', (e) => {
+    const onActive = map.queryRenderedFeatures(e.point, { layers: ['trip-line'] }).length > 0;
+    map.getCanvas().style.cursor = onActive ? '' : 'pointer';
+  });
+  map.on('mouseleave', 'trip-alt-hit', () => { map.getCanvas().style.cursor = ''; });
 
   drawRadius();
   drawTrip();
@@ -328,8 +345,8 @@ function drawOrigin() {
 }
 
 /** Fit the search circle, plus the closest camera when the circle is empty. */
-function frameResults() {
-  if (state.mode === 'trip') { frameTrip(); return; }
+function frameResults(opts) {
+  if (state.mode === 'trip') { frameTrip(opts); return; }
   const o = state.origin;
   const closest = o ? ranked()[0] : null;
   if (!o || (closest && closest.dist > FAR_MILES)) {
@@ -391,6 +408,7 @@ function setOrigin(origin) {
   setSheet(origin ? 'half' : 'peek');
   handMoved = false;
   frameResults();
+  syncURL();
   if (origin) {
     focusHeading();
     announce(summary());
@@ -403,6 +421,7 @@ function setRadius(mi) {
   syncMarkers();
   render();
   frameResults();
+  syncURL();
   el.view.querySelector('.seg [aria-checked="true"]')?.focus();
   announce(summary());
 }
@@ -416,6 +435,7 @@ function select(oid, { from = 'list' } = {}) {
   state.selected = oid;
   syncMarkers();
   render();
+  syncURL();
   const cam = oid == null ? null : state.cameras.find((c) => c.oid === oid);
   if (cam) {
     if (phone.matches && state.sheet !== 'half') setSheet('half');
@@ -468,14 +488,14 @@ function overviewHTML() {
   const total = state.cameras.length;
   const on = countOn(state.cameras);
   const lede = on === 0
-    ? `The city plans ${total} cameras. LADOT lists none as on yet.`
+    ? `The city plans ${total} cameras. LADOT lists none as active yet.`
     : on === total
-      ? `LADOT lists all ${total} city cameras as on.`
-      : `The city plans ${total} cameras. LADOT lists ${on} as on now.`;
+      ? `LADOT lists all ${total} city cameras as active.`
+      : `The city plans ${total} cameras. LADOT lists ${on} as active.`;
   const byStreet = [...state.cameras].sort((a, b) => a.street.localeCompare(b.street) || a.from.localeCompare(b.from));
   return `
     <h1>Speed cameras in Los Angeles</h1>
-    <p class="lede">${lede} Enter an address to count the cameras near it. Or map a drive, such as your commute, to see the cameras on the way.</p>
+    <p class="lede">${lede} Enter an address to count the cameras near it, or map a drive to see the cameras on the way.</p>
     <button type="button" class="btn" data-trip>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21v-8a4 4 0 0 1 4-4h9"/><path d="m15 4.5 4.5 4.5-4.5 4.5"/></svg>
       Map a drive
@@ -582,16 +602,16 @@ function detailHTML(cam) {
     <a class="btn" href="https://www.google.com/maps/search/?api=1&query=${lat},${lon}" target="_blank" rel="noopener">Open in Google Maps</a>`;
 }
 
-/** Fines and source. Drawn apart from the view, so it keeps its open state and place. */
+/** Fines, counting rules and source. Drawn apart from the view, so it keeps its open state and place. */
 function renderFoot() {
   const { live, editedAt, savedAt } = state.source;
   const day = (t) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const source = live
-    ? `Camera data from <a href="${LADOT_PAGE}" target="_blank" rel="noopener">LADOT's map</a>${editedAt ? `, last changed ${day(editedAt)}` : ''}.`
-    : `Camera data is a copy of <a href="${LADOT_PAGE}" target="_blank" rel="noopener">LADOT's map</a> saved ${day(savedAt)}. Status can be out of date.`;
-  const open = el.foot.querySelector('.fines')?.open;
+    ? `Camera data: <a href="${LADOT_PAGE}" target="_blank" rel="noopener">LADOT's map</a>${editedAt ? `, last changed ${day(editedAt)}` : ''}.`
+    : `Camera data: a copy of <a href="${LADOT_PAGE}" target="_blank" rel="noopener">LADOT's map</a> saved ${day(savedAt)}. A status may be out of date.`;
+  const isOpen = (name) => (el.foot.querySelector(`.${name}`)?.open ? 'open' : '');
   el.foot.innerHTML = `
-    <details class="fold fines" ${open ? 'open' : ''}>
+    <details class="fold fines" ${isOpen('fines')}>
       <summary>What a ticket costs</summary>
       <table>
         <tr><th scope="row">11 to 15 mph over the limit</th><td>$50</td></tr>
@@ -599,9 +619,18 @@ function renderFoot() {
         <tr><th scope="row">26 mph or more over</th><td>$200</td></tr>
         <tr><th scope="row">100 mph or faster</th><td>$500</td></tr>
       </table>
-      <p>The ticket goes by mail to the car's owner. It adds no point to a license. A car's first notice for 11 to 15 mph over is a warning.</p>
+      <p>A ticket goes by mail to the car's registered owner. It adds no points to a license. A car's first violation at 11 to 15 mph over gets a warning.</p>
     </details>
-    <p class="source">${source} A distance goes to the nearest part of the street a camera watches. A drive counts a camera when the route runs along the street it watches. Drive times are without traffic. This is not a city website. Address search by Los Angeles County and OpenStreetMap. Routes by Valhalla, or by OSRM when it is down, on OpenStreetMap data (openstreetmap.de): the start and the end of a drive go to that service.</p>`;
+    <details class="fold how" ${isOpen('how')}>
+      <summary>How this map counts</summary>
+      <ul>
+        <li>A camera watches one stretch of a street. A distance goes to the nearest part of that stretch.</li>
+        <li>A drive counts a camera when the route follows the camera's street. A street the route only crosses does not count.</li>
+        <li>Drive times do not include traffic.</li>
+        <li>The start and the end of a drive go to the route service, which finds the route.</li>
+      </ul>
+    </details>
+    <p class="source">${source} Addresses: Los Angeles County and OpenStreetMap. Routes: Valhalla and OSRM, on OpenStreetMap data. This is not a city website.</p>`;
 }
 
 function render() {
@@ -653,9 +682,10 @@ el.view.addEventListener('keydown', (e) => {
   setRadius(RADII[(i + step + RADII.length) % RADII.length]);
 });
 
-// "toggle" does not bubble. Capture it to remember the open list across renders.
+// "toggle" does not bubble. Capture it to remember open lists across renders.
 el.view.addEventListener('toggle', (e) => {
   if (e.target.classList?.contains('all')) state.allOpen = e.target.open;
+  if (e.target.classList?.contains('crossed')) state.crossedOpen = e.target.open;
 }, true);
 
 /* ---------- Bottom sheet (phone) ---------- */
@@ -896,11 +926,17 @@ function usePlace(input, spot) {
   else setEnd(input === el.from ? 'from' : 'to', spot);
 }
 
+function syncTripClear() {
+  el.clearFrom.hidden = !el.from.value;
+  el.clearTo.hidden = !el.to.value;
+}
+
 /** Use this place for the field the list belongs to. */
 async function choose(place) {
   const input = field;
   input.value = place.label;
   if (input === el.input) el.clear.hidden = false;
+  else syncTripClear();
   dismiss();
   input.blur();
   const mine = bump(input);
@@ -927,6 +963,7 @@ for (const input of inputs) {
     places = [];
     setActive(-1);
     if (input === el.input) el.clear.hidden = !input.value;
+    else syncTripClear();
     clearTimeout(lookupTimer);
     const q = input.value.trim();
     if (!q && input !== el.input) clearEnd(input === el.from ? 'from' : 'to');
@@ -938,7 +975,7 @@ for (const input of inputs) {
     if (field !== input) dismiss(); // the open list belongs to another field
     field = input;
     if (phone.matches) setSheet('peek');
-    if (input !== el.input) input.select(); // typing replaces an end of the drive
+    if (input !== el.input && !phone.matches) input.select(); // typing replaces an end of the drive
   });
 
   input.addEventListener('keydown', (e) => {
@@ -1011,6 +1048,22 @@ el.clear.addEventListener('click', () => {
   announce('Address cleared.');
 });
 
+for (const [btn, input, which, msg] of [
+  [el.clearFrom, el.from, 'from', 'Start cleared.'],
+  [el.clearTo, el.to, 'to', 'End cleared.'],
+]) {
+  btn.addEventListener('click', () => {
+    bump(input);
+    places = [];
+    input.value = '';
+    syncTripClear();
+    dismiss();
+    clearEnd(which);
+    input.focus();
+    announce(msg);
+  });
+}
+
 /** Fill a field with the device's position. */
 function useMyLocation(input, button) {
   dismiss();
@@ -1029,6 +1082,7 @@ function useMyLocation(input, button) {
       if (!current(input, mine)) return; // an address was picked, typed or cleared while this waited
       input.value = 'Your location';
       if (input === el.input) el.clear.hidden = false;
+      else syncTripClear();
       usePlace(input, { lat: pos.coords.latitude, lon: pos.coords.longitude, label: 'Your location', kind: 'gps' });
     },
     () => {
@@ -1044,7 +1098,8 @@ el.locateFrom.addEventListener('click', () => useMyLocation(el.from, el.locateFr
 
 /* ---------- A drive ---------- */
 
-const ROUTE_NAMES = { fast: 'Fastest route', streets: 'Route that avoids freeways' };
+const ROUTE_NAMES = { fast: 'Fastest route', streets: 'Avoids freeways' }; // the label on a route choice
+const ROUTE_WORDS = { fast: 'fastest route', streets: 'route that avoids freeways' }; // the same, inside a sentence
 const tripMiles = (at) => (at < 0.05 ? 'at the start' : `at ${at < 10 ? at.toFixed(1) : Math.round(at)} mi`);
 const spotName = (spot) => (spot.kind === 'gps' ? 'your location' : spot.label);
 /** A route with the cameras on it. */
@@ -1100,6 +1155,7 @@ async function fetchRoutes(from, to) {
 }
 
 const tripPins = [];
+let hadRoute = false;
 
 /** Draw the drive on the map: the two ends, the routes, and the parts on a camera stretch. */
 function drawTrip() {
@@ -1121,10 +1177,14 @@ function drawTrip() {
     }
   }
   // While a route shows, the cameras off it fade, so the map agrees with the count.
-  el.root.classList.toggle('has-route', Boolean(picked));
+  const hasRoute = Boolean(picked);
+  el.root.classList.toggle('has-route', hasRoute);
   if (!map.getSource('trip')) return; // the map style is not in yet: it draws the drive when it is
-  map.setPaintProperty('corridors', 'fill-opacity', picked ? 0.12 : CORRIDOR_FILL);
-  map.setPaintProperty('corridors-line', 'line-opacity', picked ? 0.22 : CORRIDOR_LINE);
+  if (hasRoute !== hadRoute) {
+    hadRoute = hasRoute;
+    map.setPaintProperty('corridors', 'fill-opacity', hasRoute ? 0.12 : CORRIDOR_FILL);
+    map.setPaintProperty('corridors-line', 'line-opacity', hasRoute ? 0.22 : CORRIDOR_LINE);
+  }
   const all = (features) => ({ type: 'FeatureCollection', features });
   const line = (coordinates, properties = {}) => ({ type: 'Feature', properties, geometry: { type: 'LineString', coordinates } });
   const byOid = new Map(state.cameras.map((c) => [c.oid, c]));
@@ -1133,10 +1193,11 @@ function drawTrip() {
   map.getSource('trip-hits').setData(all((picked?.hits ?? [])
     .filter((h) => h.line.length > 1 && byOid.has(h.oid))
     .map((h) => line(h.line, { status: statusOf(byOid.get(h.oid).status).key }))));
+  map.triggerRepaint();
 }
 
 /** Fit the picked route, or the ends entered so far. */
-function frameTrip() {
+function frameTrip({ quick = false } = {}) {
   const t = state.trip;
   const picked = t.routes[t.pick];
   const pts = picked ? picked.coords : [t.from, t.to].filter(Boolean).map((spot) => [spot.lon, spot.lat]);
@@ -1145,7 +1206,7 @@ function frameTrip() {
     return;
   }
   const box = pts.reduce((b, pt) => b.extend(pt), new LngLatBounds());
-  map.fitBounds(box, move({ padding: mapPadding(), maxZoom: 14.5, duration: 1100 }));
+  map.fitBounds(box, move({ padding: mapPadding(), maxZoom: 14.5, duration: quick ? 650 : 950 }));
 }
 
 function tripSummary() {
@@ -1172,10 +1233,10 @@ function tripHTML() {
     return `<h1>No driving route</h1><p class="lede">The route service found no way to drive from ${ends}.</p>${mapNotice()}`;
   }
   if (t.phase !== 'ready') {
-    const next = t.from ? 'Now enter where the drive ends.'
-      : t.to ? 'Now enter where the drive starts.'
-        : 'Enter where the drive starts and where it ends.';
-    return `<h1>Cameras on a drive</h1><p class="lede">${next} The map then counts the cameras on the way.</p>${mapNotice()}`;
+    const next = t.from ? 'Now enter the end of the drive.'
+      : t.to ? 'Now enter the start of the drive.'
+        : 'Enter the start and the end of the drive.';
+    return `<h1>Cameras on a drive</h1><p class="lede">${next} The map counts the cameras on the way.</p>${mapNotice()}`;
   }
 
   const route = t.routes[t.pick];
@@ -1189,15 +1250,15 @@ function tripHTML() {
     mix = tally(hits.map((h) => byOid.get(h.oid))).map(({ st, n: k }) => `${esc(st.tally(k))}.`).join(' ');
     mix = mix.charAt(0).toUpperCase() + mix.slice(1);
   } else {
-    mix = 'This route runs along no street with a camera.';
+    mix = 'This route does not follow any street with a camera.';
     const other = t.routes.find((r) => r !== route && r.hits.length);
-    if (other) mix += ` The ${ROUTE_NAMES[other.kind].toLowerCase()} passes ${plural(other.hits.length, 'camera')}.`;
+    if (other) mix = `The ${ROUTE_WORDS[other.kind]} passes ${plural(other.hits.length, 'camera')}.`;
   }
 
   let notice = '';
   if (t.partial && t.routes.length === 1) {
     notice = route.kind === 'fast'
-      ? '<p class="notice">The route that avoids freeways did not load. A drive on city streets can pass more cameras.</p>'
+      ? '<p class="notice">The route that avoids freeways did not load. A drive on city streets may pass more cameras.</p>'
       : '<p class="notice">The fastest route did not load. This is the route that avoids freeways.</p>';
   }
 
@@ -1221,9 +1282,9 @@ function tripHTML() {
     ${notice}${mapNotice()}
     ${chooser}
     ${n ? `<h2>On the way, in driving order</h2><ol class="cams">${hits.map(row).join('')}</ol>` : ''}
-    ${crossed.length ? `<details class="fold crossed">
-      <summary>${plural(crossed.length, 'camera street')} the route only crosses</summary>
-      <p>A camera watches the traffic on its own street. The route cuts across ${those[0]}, or passes over ${those[1]} on a freeway, so ${crossed.length === 1 ? 'its camera does' : 'their cameras do'} not count.</p>
+    ${crossed.length ? `<details class="fold crossed"${state.crossedOpen ? ' open' : ''}>
+      <summary>${crossed.length === 1 ? '1 street with a camera' : `${crossed.length} streets with cameras`} that the route only crosses</summary>
+      <p>A camera watches the traffic on its own street. The route only crosses ${those[0]}, or passes over ${those[1]} on a freeway, so ${crossed.length === 1 ? 'this camera is' : 'these cameras are'} not counted.</p>
       <ol class="cams">${crossed.map(row).join('')}</ol>
     </details>` : ''}`;
 }
@@ -1231,10 +1292,11 @@ function tripHTML() {
 let tripTicket = 0; // guards the route: a swap, a new end or a closed drive drops an older answer
 
 /** Find the routes for the two ends, count their cameras and show them. */
-async function planTrip() {
+async function planTrip({ preferKind = null, keepSelected = null } = {}) {
   const t = state.trip;
   const mine = ++tripTicket;
   state.selected = null;
+  state.crossedOpen = false;
   t.routes = [];
   t.pick = 0;
   t.partial = false;
@@ -1244,6 +1306,7 @@ async function planTrip() {
     render();
     handMoved = false;
     frameResults();
+    syncURL();
   };
   if (!t.from || !t.to) {
     t.phase = 'idle';
@@ -1256,15 +1319,29 @@ async function planTrip() {
   let found = null;
   try { found = await fetchRoutes(t.from, t.to); } catch { /* no route service answered */ } finally { done(); }
   if (mine !== tripTicket) return;
+  let routes = [];
+  // A malformed route must not leave the panel on "Finding the route".
+  try { routes = found ? found.routes.map(scored) : []; } catch { found = null; }
   if (!found) t.phase = 'failed';
   else if (!found.routes.length) t.phase = 'none';
   else {
-    t.routes = found.routes.map(scored);
+    t.routes = routes;
+    if (preferKind) {
+      const idx = t.routes.findIndex((r) => r.kind === preferKind);
+      if (idx >= 0) t.pick = idx;
+    }
     t.partial = found.partial;
     t.phase = 'ready';
+    if (keepSelected != null && state.cameras.some((c) => c.oid === keepSelected)) {
+      state.selected = keepSelected;
+    }
   }
   setSheet('half');
   show();
+  if (state.selected != null) {
+    const cam = state.cameras.find((c) => c.oid === state.selected);
+    if (cam) focusCamera(cam, { instant: true });
+  }
   if (!inputs.includes(document.activeElement)) focusHeading();
   announce(tripSummary());
 }
@@ -1288,11 +1365,13 @@ function pickRoute(i) {
   if (!t.routes[i] || i === t.pick) return;
   t.pick = i;
   state.selected = null;
+  state.crossedOpen = false;
   drawTrip();
   syncMarkers();
   render();
   handMoved = false;
-  frameResults();
+  frameResults({ quick: true });
+  syncURL();
   // Keep the list at its top: a plain focus would scroll the count half out of view.
   el.view.querySelector('.routes [aria-checked="true"]')?.focus({ preventScroll: true });
   announce(tripSummary());
@@ -1318,17 +1397,19 @@ function openTrip() {
   for (const input of inputs) bump(input);
   const start = state.origin ? { lat: state.origin.lat, lon: state.origin.lon, label: state.origin.label, kind: state.origin.kind } : null;
   state.mode = 'trip';
+  state.crossedOpen = false;
   state.trip = { ...newTrip(), from: start };
   state.origin = null;
   el.from.value = start?.label ?? '';
   el.to.value = '';
+  syncTripClear();
   measure();
   drawOrigin();
   showMode();
   planTrip();
   setSheet('peek');
   (start ? el.to : el.from).focus();
-  announce(start ? 'Enter where the drive ends.' : 'Enter where the drive starts and where it ends.');
+  announce(start ? 'Enter the end of the drive.' : 'Enter the start and the end of the drive.');
 }
 
 function closeTrip() {
@@ -1337,9 +1418,11 @@ function closeTrip() {
   tripTicket += 1;
   const back = state.trip.from;
   state.mode = 'near';
+  state.crossedOpen = false;
   state.trip = newTrip();
   el.from.value = '';
   el.to.value = '';
+  syncTripClear();
   el.input.value = back?.label ?? '';
   el.clear.hidden = !back;
   showMode();
@@ -1356,12 +1439,14 @@ el.closeTrip.addEventListener('click', closeTrip);
 
 el.swap.addEventListener('click', () => {
   const t = state.trip;
+  const preferKind = t.routes[t.pick]?.kind ?? null;
   bump(el.from);
   bump(el.to);
   [t.from, t.to] = [t.to, t.from];
   [el.from.value, el.to.value] = [el.to.value, el.from.value];
+  syncTripClear();
   dismiss();
-  planTrip();
+  planTrip({ preferKind });
   announce('Start and end swapped.');
 });
 
@@ -1371,11 +1456,46 @@ if (['localhost', '127.0.0.1'].includes(location.hostname)) {
   window.__app = { map, state, setOrigin, geocode, countyCandidates, locate };
 }
 
-measure();
-syncMarkers();
-render();
+const initial = parseParams(location.search);
+state.radius = initial.radius;
+if (initial.mode === 'trip') {
+  state.mode = 'trip';
+  state.trip = { ...newTrip(), from: initial.from, to: initial.to };
+  el.from.value = initial.from?.label ?? '';
+  el.to.value = initial.to?.label ?? '';
+  syncTripClear();
+  measure();
+  showMode();
+  if (initial.from && initial.to) {
+    planTrip({ preferKind: initial.routeKind, keepSelected: initial.selected });
+  } else {
+    drawTrip();
+    syncMarkers();
+    render();
+    setSheet('peek');
+    frameResults();
+    if (initial.selected != null && state.cameras.some((c) => c.oid === initial.selected)) {
+      select(initial.selected, { from: 'map' });
+    }
+  }
+} else if (initial.origin) {
+  el.input.value = initial.origin.label;
+  el.clear.hidden = false;
+  setOrigin(initial.origin);
+  if (initial.selected != null && state.cameras.some((c) => c.oid === initial.selected)) {
+    select(initial.selected, { from: 'map' });
+  }
+} else {
+  measure();
+  syncMarkers();
+  render();
+  setSheet('peek');
+  if (initial.selected != null && state.cameras.some((c) => c.oid === initial.selected)) {
+    select(initial.selected, { from: 'map' });
+  }
+}
 renderFoot();
-setSheet('peek');
+readyForURL = true;
 
 refreshFromLadot()
   .then(async (changed) => {

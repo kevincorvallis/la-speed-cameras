@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!-- The page may load code only from this site, and may call only the services it names.
+       A new outside service needs its host added here. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://services.arcgis.com https://geocode.gis.lacounty.gov https://photon.komoot.io https://valhalla1.openstreetmap.de https://routing.openstreetmap.de https://tiles.openfreemap.org; base-uri 'none'; object-src 'none'; form-action 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>LA speed cameras near you</title>
   <meta name="description" content="Enter an address, or map a drive. See how many Los Angeles speed cameras are near it and where each one stands.">
@@ -39,10 +42,13 @@
           <input id="from" name="from" type="text" placeholder="Start" enterkeyhint="search"
                  autocapitalize="words" autocorrect="off" spellcheck="false"
                  role="combobox" aria-expanded="false" aria-controls="suggest" aria-autocomplete="list">
+          <button type="button" class="search__btn search__clear" id="clear-from" aria-label="Clear the start" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" class="tint"/><path d="m9.2 9.2 5.6 5.6M14.8 9.2l-5.6 5.6"/></svg>
+          </button>
           <button type="button" class="search__btn" id="locate-from" aria-label="Start at my location">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="1.6" class="fill"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
           </button>
-          <button type="button" class="search__btn" id="close-trip" aria-label="Close the drive">
+          <button type="button" class="search__btn search__close" id="close-trip" aria-label="Close the drive">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
           </button>
         </div>
@@ -52,6 +58,9 @@
           <input id="to" name="to" type="text" placeholder="End" enterkeyhint="search"
                  autocapitalize="words" autocorrect="off" spellcheck="false"
                  role="combobox" aria-expanded="false" aria-controls="suggest" aria-autocomplete="list">
+          <button type="button" class="search__btn search__clear" id="clear-to" aria-label="Clear the end" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" class="tint"/><path d="m9.2 9.2 5.6 5.6M14.8 9.2l-5.6 5.6"/></svg>
+          </button>
           <button type="button" class="search__btn" id="swap" aria-label="Swap the start and the end">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 20V5M4 9l4-4 4 4M16 4v15M12 15l4 4 4-4"/></svg>
           </button>

@@ -21,7 +21,7 @@ test.describe('overview', () => {
   test('shows every camera and where the data came from', async ({ page }) => {
     const { errors } = await open(page);
     await expect(page.locator('#view h1')).toHaveText('Speed cameras in Los Angeles');
-    await expect(page.locator('.lede')).toContainText(`The city plans ${cameras.length} cameras. LADOT lists ${on} as on now.`);
+    await expect(page.locator('.lede')).toContainText(`The city plans ${cameras.length} cameras. LADOT lists ${on} as active.`);
     await expect(page.locator('.legend li')).toHaveCount(2);
     await expect(page.locator('#foot .source')).toContainText("LADOT's map, last changed Nov 6, 2026");
     await expect(page.locator('#foot .source')).toContainText('This is not a city website');
@@ -299,33 +299,33 @@ test.describe('map markers', () => {
 test.describe('LADOT data', () => {
   test('LADOT down: the saved copy shows, and says it is a copy', async ({ page }) => {
     await open(page, { ladot: 'down' });
-    await expect(page.locator('#foot .source')).toContainText('Camera data is a copy of');
-    await expect(page.locator('#foot .source')).toContainText('Status can be out of date');
-    await expect(page.locator('.lede')).toContainText(`LADOT lists ${on} as on now`);
+    await expect(page.locator('#foot .source')).toContainText('Camera data: a copy of');
+    await expect(page.locator('#foot .source')).toContainText('A status may be out of date');
+    await expect(page.locator('.lede')).toContainText(`LADOT lists ${on} as active`);
     await search(page, '6300 mel', '6300 Melrose Ave');
     await expect(page.locator('.count__n')).toHaveText(String(expectedNear(PLACES.melrose, 2)));
   });
 
   test('LADOT renames its status field: the saved copy stays', async ({ page }) => {
     await open(page, { change: ({ System, ...rest }) => ({ ...rest, Status: System }) });
-    await expect(page.locator('#foot .source')).toContainText('Camera data is a copy of');
-    await expect(page.locator('.lede')).toContainText(`LADOT lists ${on} as on now`);
+    await expect(page.locator('#foot .source')).toContainText('Camera data: a copy of');
+    await expect(page.locator('.lede')).toContainText(`LADOT lists ${on} as active`);
     await expect(page.locator('.lede')).not.toContainText('all');
   });
 
-  test('a status the app has never seen shows in LADOT\'s words, and does not count as on', async ({ page }) => {
+  test('a status the app has never seen shows in LADOT\'s words, and does not count as active', async ({ page }) => {
     await open(page, { change: (p) => ({ ...p, System: 'Paused For Repair' }) });
-    await expect(page.locator('.lede')).toContainText('LADOT lists none as on yet');
+    await expect(page.locator('.lede')).toContainText('LADOT lists none as active yet');
     await expect(page.locator('.legend')).toContainText('Paused For Repair');
     await expect(page.locator('.legend__n')).toHaveText(String(cameras.length));
   });
 
   test('"Citation Live" reads as issuing tickets', async ({ page }) => {
     await open(page, { change: (p) => ({ ...p, System: 'Citation Live' }) });
-    await expect(page.locator('.lede')).toContainText(`LADOT lists all ${cameras.length} city cameras as on.`);
-    await expect(page.locator('.legend')).toContainText('Issues tickets');
+    await expect(page.locator('.lede')).toContainText(`LADOT lists all ${cameras.length} city cameras as active.`);
+    await expect(page.locator('.legend')).toContainText('Issuing tickets');
     await search(page, '6300 mel', '6300 Melrose Ave');
-    await expect(page.locator('.mix')).toContainText(/issues? tickets\./);
+    await expect(page.locator('.mix')).toContainText(/(is|are) issuing tickets\./);
   });
 
   test('status text from LADOT cannot inject markup', async ({ page }) => {

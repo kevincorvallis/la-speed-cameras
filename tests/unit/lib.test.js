@@ -6,6 +6,7 @@ import {
   formatMiles, plural, fold, cleanQuery, placeKey, placeFromText, placeFromPhoton, tidyParcel,
   placeFromCandidate, looksLike, mergeSuggestions, decideOnEnter, decideFromSuggestions,
   streetKey, mergeLive, signature, layoutSigns, snapFor,
+  formatParams, parseParams,
 } from '../../lib.js';
 
 const place = (text, extra) => placeFromText(text, extra);
@@ -43,7 +44,7 @@ describe('statusOf', () => {
   test('tally words agree in number', () => {
     assert.equal(statusOf('Warning Live').tally(1), '1 is in the warning period');
     assert.equal(statusOf('Warning Live').tally(3), '3 are in the warning period');
-    assert.equal(statusOf('Citation Live').tally(1), '1 issues tickets');
+    assert.equal(statusOf('Citation Live').tally(1), '1 is issuing tickets');
     assert.equal(statusOf('Under Construction').tally(2), '2 are under construction');
     assert.equal(statusOf('Under Construction').label, 'Under construction');
   });
@@ -57,7 +58,7 @@ describe('tally and countOn', () => {
   test('groups in order: fine, warn, other, build', () => {
     assert.deepEqual(tally(cams).map((g) => [g.st.key, g.n]), [['fine', 1], ['warn', 2], ['other', 1], ['build', 1]]);
   });
-  test('an unknown status does not count as on', () => {
+  test('an unknown status does not count as active', () => {
     assert.equal(countOn(cams), 3);
     assert.equal(countOn([{ status: 'Renamed' }, { status: 'Renamed' }]), 0);
   });
@@ -215,6 +216,12 @@ describe('address text', () => {
 });
 
 describe('looksLike', () => {
+  test('words that are also Object property names do not throw', () => {
+    for (const word of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      assert.equal(looksLike(word, place(`${word} St, Los Angeles`)), true);
+      assert.equal(looksLike(`100 ${word} ave`, place('100 Main St, Los Angeles')), false);
+    }
+  });
   const melrose = place('6300 Melrose Ave, Los Angeles, 90038');
   test('fits a partial and a full address', () => {
     assert.ok(looksLike('6300 mel', melrose));
@@ -358,6 +365,30 @@ describe('mergeLive', () => {
     geometry: { coordinates: [c.lon, c.lat] },
     properties: { OBJECTID: c.oid, System: 'Warning Live', StreetName: c.street, XStreet1: c.from, XStreet2: c.to, ...props },
   });
+  test('a broken position from LADOT keeps the saved place and takes the live status', () => {
+    // One latitude of 91 once reached the map, which threw and stopped every search.
+    for (const bad of [[saved[3].lon, 91], [0, 0], [NaN, saved[3].lat], [-122.4, 37.8]]) {
+      const feats = saved.map((c) => feature(c, { System: 'Citation Live' }));
+      feats[3].geometry.coordinates = bad;
+      const out = mergeLive(saved, feats);
+      assert.equal(out.length, 60);
+      assert.equal(out[3].lat, saved[3].lat);
+      assert.equal(out[3].lon, saved[3].lon);
+      assert.equal(out[3].status, 'Citation Live');
+    }
+  });
+  test('a new camera with a broken position is left out', () => {
+    const extra = { oid: 999, street: 'New St', from: 'A St', to: 'B St', lon: -118.3, lat: 91 };
+    const out = mergeLive(saved, [...saved.map((c) => feature(c)), feature(extra)]);
+    assert.equal(out.length, 60);
+    assert.ok(!out.some((c) => c.street === 'New St'));
+  });
+  test('every merged camera has a position the map can draw', () => {
+    const feats = saved.map((c, i) => feature(i % 7 ? c : { ...c, lat: -400 }));
+    for (const c of mergeLive(saved, feats)) {
+      assert.ok(c.lat > 33 && c.lat < 35 && c.lon > -120 && c.lon < -117, `${c.lat}, ${c.lon}`);
+    }
+  });
   test('takes the live status and keeps the saved limit', () => {
     const out = mergeLive(saved, saved.map((c) => feature(c)));
     assert.equal(out.length, 60);
@@ -373,7 +404,7 @@ describe('mergeLive', () => {
     assert.equal(out[3].street, 'Street Three Renamed');
   });
   test('a new camera gets a new id and no limit', () => {
-    const extra = { oid: 999, street: 'New Rd', from: 'X', to: 'Y', lon: -117.5, lat: 34.5 };
+    const extra = { oid: 999, street: 'New Rd', from: 'X', to: 'Y', lon: -117.9, lat: 34.5 };
     const out = mergeLive(saved, [...saved.map((c) => feature(c)), feature(extra)], () => 7);
     const added = out.at(-1);
     assert.equal(added.oid, 'new-999');
@@ -394,18 +425,29 @@ describe('mergeLive', () => {
     assert.throws(() => mergeLive(saved, feats), /too few usable/);
   });
   test('throws when the street names no longer match and positions moved', () => {
-    const feats = saved.map((c) => feature({ ...c, street: `Other ${c.oid}`, lat: 35 }));
+    const feats = saved.map((c) => feature({ ...c, street: `Other ${c.oid}`, lat: 34.5 }));
     assert.throws(() => mergeLive(saved, feats), /no longer matches/);
+    // Renamed and placed outside Los Angeles: nothing usable is left.
+    const away = saved.map((c) => feature({ ...c, street: `Other ${c.oid}`, lat: 36 }));
+    assert.throws(() => mergeLive(saved, away), /too few/);
   });
   test('throws on too few cameras or a wrong shape', () => {
     assert.throws(() => mergeLive(saved, saved.slice(0, 10).map((c) => feature(c))), /too few/);
     assert.throws(() => mergeLive(saved, null), /too few/);
     assert.throws(() => mergeLive(saved, { error: 'x' }), /too few/);
   });
-  test('skips a feature with no position', () => {
+  test('a feature with no position keeps the saved place when its streets match', () => {
     const feats = saved.map((c) => feature(c));
     feats[0].geometry = null;
     feats[1].geometry.coordinates = ['a', 'b'];
+    const out = mergeLive(saved, feats);
+    assert.equal(out.length, 60);
+    assert.deepEqual([out[0].lon, out[0].lat, out[1].lon, out[1].lat], [saved[0].lon, saved[0].lat, saved[1].lon, saved[1].lat]);
+  });
+  test('skips a feature with no position and no saved camera to match', () => {
+    const feats = saved.map((c) => feature(c));
+    feats[0] = { geometry: null, properties: { ...feats[0].properties, StreetName: 'Nowhere Rd' } };
+    feats[1] = { geometry: { coordinates: ['a', 'b'] }, properties: { ...feats[1].properties, StreetName: 'Nowhere Ave' } };
     assert.equal(mergeLive(saved, feats).length, 58);
   });
   test('coordinates come out as numbers', () => {
@@ -477,5 +519,73 @@ describe('snapFor', () => {
   test('a flick carries to the next size', () => {
     assert.equal(snapFor(300, 1.5, snaps), 'full');
     assert.equal(snapFor(450, -1.2, snaps), 'peek');
+  });
+});
+
+describe('formatParams and parseParams', () => {
+  test('overview produces an empty query string', () => {
+    assert.equal(formatParams({ mode: 'near', origin: null, radius: 2, trip: null, selected: null }), '');
+    assert.deepEqual(parseParams(''), {
+      mode: 'near', origin: null, radius: 2, from: null, to: null, routeKind: 'fast', selected: null,
+    });
+  });
+  test('round-trips an address search with non-default radius and camera', () => {
+    const qs = formatParams({
+      mode: 'near',
+      origin: { lat: 34.08342, lon: -118.33528, label: '6300 Melrose Ave, Los Angeles', kind: 'address' },
+      radius: 5,
+      selected: 42,
+    });
+    assert.deepEqual(parseParams(qs), {
+      mode: 'near',
+      origin: { lat: 34.08342, lon: -118.33528, label: '6300 Melrose Ave, Los Angeles', kind: 'address' },
+      radius: 5,
+      from: null,
+      to: null,
+      routeKind: 'fast',
+      selected: 42,
+    });
+  });
+  test('round-trips a drive with both ends and route preference', () => {
+    const qs = formatParams({
+      mode: 'trip',
+      trip: {
+        from: { lat: 34.05405, lon: -118.24318, label: '200 North Spring Street, Los Angeles', kind: 'address' },
+        to: { lat: 34.01166, lon: -118.49224, label: '1685 Main St, Santa Monica', kind: 'address' },
+        routes: [{ kind: 'fast' }, { kind: 'streets' }],
+        pick: 1,
+      },
+      selected: null,
+    });
+    assert.deepEqual(parseParams(qs), {
+      mode: 'trip',
+      origin: null,
+      radius: 2,
+      from: { lat: 34.05405, lon: -118.24318, label: '200 North Spring Street, Los Angeles', kind: 'address' },
+      to: { lat: 34.01166, lon: -118.49224, label: '1685 Main St, Santa Monica', kind: 'address' },
+      routeKind: 'streets',
+      selected: null,
+    });
+  });
+  test('GPS coordinates never go into the URL', () => {
+    const qs = formatParams({
+      mode: 'trip',
+      trip: {
+        from: { lat: 34.08, lon: -118.33, label: 'Your location', kind: 'gps' },
+        to: { lat: 34.01166, lon: -118.49224, label: '1685 Main St, Santa Monica', kind: 'address' },
+        routes: [],
+        pick: 0,
+      },
+    });
+    assert.ok(!qs.includes('34.08'));
+    assert.ok(!qs.includes('from='));
+    assert.equal(formatParams({ mode: 'near', origin: { lat: 34.08, lon: -118.33, label: 'Your location', kind: 'gps' }, radius: 5 }), '');
+  });
+  test('ignores out-of-range coordinates and unknown values', () => {
+    const parsed = parseParams('?drive=1&from=999,-118&fromName=Bad&to=34,-118&mi=99&route=bogus');
+    assert.equal(parsed.from, null);
+    assert.equal(parsed.to, null);
+    assert.equal(parsed.radius, 2);
+    assert.equal(parsed.routeKind, 'fast');
   });
 });

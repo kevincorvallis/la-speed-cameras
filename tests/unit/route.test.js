@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   decodePolyline, lineMiles, sampleLine, camerasOnRoute, routeFromValhalla, routeFromOsrm,
-  sameRoute, formatMinutes, miles,
+  sameRoute, formatMinutes, miles, usableLine,
 } from '../../lib.js';
 
 const read = (path) => JSON.parse(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8'));
@@ -143,7 +143,7 @@ describe('routeFromValhalla and routeFromOsrm', () => {
     const route = routeFromValhalla(fixtures['fast:cityHall-santaMonica'].trip);
     assert.ok(Math.abs(route.miles - 15.9) < 0.2);
     assert.ok(route.minutes >= 15 && route.minutes <= 30);
-    assert.equal(route.via, 'I 10 West and CA 110 South');
+    assert.equal(route.via, 'I-10 West and CA-110 South');
   });
   test('a trip with no line is null', () => {
     assert.equal(routeFromValhalla(null), null);
@@ -160,6 +160,52 @@ describe('routeFromValhalla and routeFromOsrm', () => {
     assert.equal(route.minutes, 21);
     assert.equal(route.via, 'Santa Monica Freeway and Harbor Freeway');
     assert.equal(routeFromOsrm({ geometry: { coordinates: [] } }), null);
+  });
+});
+
+describe('a broken or hostile answer from a route service', () => {
+  const hostile = (pts) => {
+    // Encode [lon, lat] pairs the way Valhalla does, at 6 decimals.
+    let out = '';
+    let last = [0, 0];
+    for (const [lon, lat] of pts) {
+      const next = [Math.round(lat * 1e6), Math.round(lon * 1e6)];
+      for (let k = 0; k < 2; k++) {
+        let v = (next[k] - last[k]) * 2;
+        if (v < 0) v = -v - 1;
+        while (v >= 0x20) { out += String.fromCharCode((0x20 | (v % 32)) + 63); v = Math.floor(v / 32); }
+        out += String.fromCharCode(v + 63);
+      }
+      last = next;
+    }
+    return { summary: { length: 1, time: 60 }, legs: [{ shape: out, maneuvers: [] }] };
+  };
+  test('usableLine takes a real route', () => {
+    assert.equal(usableLine(routeFromValhalla(fixtures['streets:cityHall-santaMonica'].trip).coords), true);
+  });
+  test('usableLine rejects what is not a drive in California', () => {
+    assert.equal(usableLine(null), false);
+    assert.equal(usableLine([]), false);
+    assert.equal(usableLine([[-118.3, 34]]), false);
+    assert.equal(usableLine([[-118.3, 34], null]), false);
+    assert.equal(usableLine([[-118.3, 34], [NaN, 34]]), false);
+    assert.equal(usableLine([[-118.3, 34], ['x', 34]]), false);
+    assert.equal(usableLine([[-118.3, 34], [-74, 40.7]]), false, 'New York');
+    assert.equal(usableLine([[-124.9, 31.1], [-113.1, 42.9]]), false, 'inside the box, but 1,000 miles');
+    assert.equal(usableLine(Array.from({ length: 100001 }, () => [-118.3, 34])), false);
+  });
+  test('three points half a world apart do not become millions of samples', () => {
+    // This 16-byte answer once made 4 million samples and 750 MB of memory.
+    const trip = hostile([[-179, 0], [179, 0], [-179, 0]]);
+    assert.equal(routeFromValhalla(trip), null);
+    assert.deepEqual(camerasOnRoute([[-179, 0], [179, 0], [-179, 0]], cameras, corridorOf), { hits: [], crossed: [] });
+  });
+  test('a route with a missing point is no route', () => {
+    assert.equal(routeFromOsrm({ distance: 1, duration: 1, geometry: { coordinates: [[-118.3, 34], null, [-118.31, 34]] } }), null);
+    assert.equal(routeFromValhalla({ legs: [{ shape: 'x'.repeat(2e6 + 1) }] }), null);
+  });
+  test('a long real drive still counts: Los Angeles to San Francisco fits', () => {
+    assert.equal(usableLine([[-118.24, 34.05], [-119.0, 35.4], [-120.6, 36.9], [-122.42, 37.77]]), true);
   });
 });
 

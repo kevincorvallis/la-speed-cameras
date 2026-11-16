@@ -219,6 +219,7 @@ h1:focus { outline: none; } /* a heading that takes focus after a view change */
 .search {
   position: relative;
   flex: none;
+  padding: 5px;
   background: var(--guide);
   border-radius: 13px;
   box-shadow:
@@ -232,19 +233,19 @@ h1:focus { outline: none; } /* a heading that takes focus after a view change */
   display: flex;
   align-items: center;
   gap: 2px;
-  height: 58px;
-  padding: 0 10px 0 18px;
+  height: 48px;
+  padding: 0 5px 0 13px;
 }
 .search__row[hidden], .search__trip[hidden] { display: none; }
 /* A drive: two lines on the sign, start over end, like a guide sign with two exits. */
-.search__trip { padding: 5px 0; }
-.search__trip .search__row { position: relative; height: 51px; padding-left: 15px; }
+.search__trip { padding: 0; }
+.search__trip .search__row { position: relative; height: 51px; padding: 0 5px 0 10px; }
 .search__trip .search__row + .search__row::before {
   content: "";
   position: absolute;
   top: 0;
-  left: 16px;
-  right: 16px;
+  left: 11px;
+  right: 11px;
   height: 1px;
   background: rgba(255, 255, 255, 0.42);
 }
@@ -269,20 +270,40 @@ h1:focus { outline: none; } /* a heading that takes focus after a view change */
   fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
 }
 .search svg .fill { fill: currentColor; stroke: none; }
+.search svg .tint { fill: rgba(255, 255, 255, 0.22); stroke: none; }
 .search input {
   flex: 1;
   min-width: 0;
   height: 100%;
   padding: 3px 8px 0 10px;
   border: 0;
+  border-radius: 6px;
   outline: 0;
   background: none;
   color: #fff;
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0.005em;
+  text-overflow: ellipsis;
 }
 .search input::placeholder { color: rgba(255, 255, 255, 0.8); font-weight: 500; }
+/* Keep browser autofill (especially iPhone Contacts/Safari autofill) white-on-green inside the frame. */
+.search input:-webkit-autofill,
+.search input:-webkit-autofill:hover,
+.search input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #fff;
+  caret-color: #fff;
+  -webkit-box-shadow: 0 0 0 1000px var(--guide) inset;
+  box-shadow: 0 0 0 1000px var(--guide) inset;
+  transition: background-color 99999s ease-out 0s;
+}
+@supports selector(:autofill) {
+  .search input:autofill {
+    color: #fff;
+    caret-color: #fff;
+    box-shadow: 0 0 0 1000px var(--guide) inset;
+  }
+}
 .search__btn {
   flex: none;
   display: grid;
@@ -293,6 +314,19 @@ h1:focus { outline: none; } /* a heading that takes focus after a view change */
   border-radius: 8px;
   background: none;
   color: #fff;
+}
+.search__clear { width: 32px; height: 36px; opacity: 0.88; }
+.search__clear svg { width: 20px; height: 20px; stroke-width: 2; }
+.search__clear:hover { opacity: 1; }
+.search__close { position: relative; margin-left: 4px; }
+.search__close::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: 9px;
+  bottom: 9px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.34);
 }
 .search__btn:hover { background: rgba(255, 255, 255, 0.14); }
 .search__btn[hidden] { display: none; }
@@ -595,6 +629,10 @@ button.btn { border: 0; }
 .fines th, .fines td { padding: 7px 0 5px; border-top: 1px solid var(--line); font-weight: 400; text-align: left; }
 .fines td { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
 .fines p { padding: 10px 0 14px; color: var(--asphalt); font-size: 14px; }
+.how { border-top: 0; }
+.how ul { padding: 0 0 12px; color: var(--asphalt); font-size: 14px; }
+.how li { position: relative; padding: 3px 0 3px 14px; }
+.how li::before { content: ""; position: absolute; left: 0; top: 0.75em; width: 5px; height: 5px; border-radius: 50%; background: var(--asphalt); }
 .all { margin-top: 18px; border-top: 0; }
 .all .cams { padding-bottom: 6px; }
 .source { margin-top: 14px; color: var(--asphalt); font-size: 13px; line-height: 1.45; }
@@ -612,9 +650,9 @@ button.btn { border: 0; }
     left: calc(env(safe-area-inset-left, 0px) + 10px);
     right: calc(env(safe-area-inset-right, 0px) + 10px);
   }
-  .search__row { height: 56px; }
+  .search__row { height: 46px; }
   .search__trip .search__row { height: 49px; }
-  .suggest { max-height: min(46dvh, 360px); }
+  .suggest { max-height: min(46dvh, calc(100dvh - 145px), 360px); }
 
   .panel {
     position: fixed;
@@ -660,6 +698,7 @@ button.btn { border: 0; }
 
 /* A very narrow phone: the address field needs the room more than the looking glass does. */
 @media (max-width: 380px) {
-  #near { padding-left: 12px; }
+  #near { padding-left: 7px; }
   #near .search__icon { display: none; }
+  .search__trip .search__row { padding-left: 7px; padding-right: 3px; }
 }

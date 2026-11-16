@@ -66,6 +66,14 @@ When LADOT's live data does not load, or its fields change, the page keeps the s
 - Drive times are without traffic. The route services know no traffic.
 - A status label repeats LADOT's listing. The data has no switch-on dates, so the page does not say when fines start for a camera.
 
+## Safety rules in the code
+
+- The page has a content security policy (the `meta` tag at the top of `index.html`). It lets the page run code only from this site and call only the services it names. Add a new service's host there, or the browser blocks it.
+- `vercel.json` adds headers that stop other sites from framing the page and limit device permissions to location.
+- Text from outside services goes through `esc` before it enters the page.
+- A camera position from LADOT outside greater Los Angeles is not trusted: the camera keeps its saved place. A route outside California, or longer than 600 miles, is rejected.
+- The web address holds the current search or drive, so a link can be shared. A position from the device's location never goes into it.
+
 ## Before a public launch
 
 - The start and the end of a drive go to the route service. The page says so under the panel.
@@ -91,7 +99,7 @@ Run it when LADOT adds, moves or removes a camera. A status change alone needs n
 
 - The camera `ID` is not unique: `12-6` appears twice. The code keys cameras by `OBJECTID` and by street names.
 - One corridor spells a cross street differently from its camera. The build script joins that pair by position.
-- LADOT's legend has three status values: `Under Construction`, `Warning Live` and `Citation Live`. A value the code does not know shows with LADOT's own text and does not count as on.
+- LADOT's legend has three status values: `Under Construction`, `Warning Live` and `Citation Live`. A value the code does not know shows with LADOT's own text and does not count as active.
 - LADOT's map and its council district lists disagree on the speed limit for two cameras (S La Cienega Blvd and S Slauson Ave). `LIMIT_CONFLICTS` in the build script records the second value, and the page shows both.
 - The map layer counts 125 camera systems. Each system has two poles, which the page does not draw.
 

@@ -11,18 +11,18 @@ export const STATUS_ORDER = ['fine', 'warn', 'other', 'build'];
 const KNOWN_STATUS = {
   'under construction': {
     key: 'build', label: 'Under construction',
-    note: 'LADOT lists it as under construction.',
+    note: 'Not active yet. LADOT lists it as under construction.',
     tally: (n) => `${n} ${n === 1 ? 'is' : 'are'} under construction`,
   },
   'warning live': {
     key: 'warn', label: 'Warning period',
-    note: 'On. LADOT lists it in its 60-day warning period: it mails warnings, not fines.',
+    note: 'Active. LADOT lists it in its 60-day warning period: drivers get warnings by mail, not fines.',
     tally: (n) => `${n} ${n === 1 ? 'is' : 'are'} in the warning period`,
   },
   'citation live': {
-    key: 'fine', label: 'Issues tickets',
-    note: 'On. LADOT lists it as issuing tickets.',
-    tally: (n) => `${n} ${n === 1 ? 'issues' : 'issue'} tickets`,
+    key: 'fine', label: 'Issuing tickets',
+    note: 'Active. LADOT lists it as issuing tickets.',
+    tally: (n) => `${n} ${n === 1 ? 'is' : 'are'} issuing tickets`,
   },
 };
 
@@ -53,7 +53,7 @@ export function tally(cameras) {
     STATUS_ORDER.indexOf(a.st.key) - STATUS_ORDER.indexOf(b.st.key));
 }
 
-/** Cameras LADOT lists as on. A status we do not know does not count as on. */
+/** Cameras LADOT lists as active. A status we do not know does not count as active. */
 export function countOn(cameras) {
   return cameras.filter((c) => ['warn', 'fine'].includes(statusOf(c.status).key)).length;
 }
@@ -166,7 +166,8 @@ const ABBREVIATIONS = {
   street: 'st', avenue: 'ave', boulevard: 'blvd', drive: 'dr', road: 'rd', place: 'pl',
   lane: 'ln', court: 'ct', highway: 'hwy', parkway: 'pkwy', terrace: 'ter', circle: 'cir',
 };
-const short = (w) => ABBREVIATIONS[w] ?? w;
+// hasOwn: a plain lookup would return Object's own "constructor" for the word "constructor".
+const short = (w) => (Object.hasOwn(ABBREVIATIONS, w) ? ABBREVIATIONS[w] : w);
 const DIRECTIONS = new Set(['n', 's', 'e', 'w']);
 // Words that say little about which place is meant.
 const FILLER = new Set(('n s e w st ave blvd dr rd pl ln ct way hwy and at the ca los angeles').split(' '));
@@ -322,6 +323,10 @@ export function decideFromSuggestions(q, places) {
 
 /* ---------- LADOT live data ---------- */
 
+/** Greater Los Angeles, with room to spare: west, south, east, north. */
+const LA_AREA = [-119.2, 33.4, -117.5, 34.9];
+const inLosAngelesArea = (lon, lat) => lon > LA_AREA[0] && lon < LA_AREA[2] && lat > LA_AREA[1] && lat < LA_AREA[3];
+
 export const streetKey = (street, from, to) => [street, from, to].map((s) => fold(s).trim()).join('|');
 
 /**
@@ -336,14 +341,20 @@ export function mergeLive(saved, features, districtOf = () => null) {
   let matched = 0;
   for (const f of features) {
     const p = f?.properties ?? {};
-    const lon = Number(f?.geometry?.coordinates?.[0]);
-    const lat = Number(f?.geometry?.coordinates?.[1]);
-    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+    let lon = Number(f?.geometry?.coordinates?.[0]);
+    let lat = Number(f?.geometry?.coordinates?.[1]);
+    // A position outside greater Los Angeles is a broken one. The map cannot draw it,
+    // and one such marker would stop every search. Do not trust it.
+    const placed = Number.isFinite(lon) && Number.isFinite(lat) && inLosAngelesArea(lon, lat);
     if (typeof p.System !== 'string' || typeof p.StreetName !== 'string') continue;
     let old = byKey.get(streetKey(p.StreetName, p.XStreet1, p.XStreet2));
     if (!old || !left.has(old)) {
       // The street text changed. A saved camera within 60 m is the same camera.
-      old = [...left].find((c) => miles(lat, lon, c.lat, c.lon) < 0.04) ?? null;
+      old = placed ? ([...left].find((c) => miles(lat, lon, c.lat, c.lon) < 0.04) ?? null) : null;
+    }
+    if (!placed) {
+      if (!old) continue; // no usable position, and no saved camera to take one from
+      ({ lon, lat } = old); // keep the saved position, take the live status
     }
     if (old) { left.delete(old); matched += 1; }
     cameras.push({
@@ -415,6 +426,24 @@ const ALONG_COS = Math.cos(rad(35)); // the route runs along the stretch within 
 const ALONG_MIN = 0.03; // drive this far along a stretch and its camera counts: about 50 m
 const INSIDE_MIN = 0.1; // or stay this long on the stretch, whatever the direction: about 160 m
 const POINT_REACH = 0.03; // a camera with no stretch counts when the route passes this near
+
+// A route must stay in this box, under this length and under this many points.
+// A broken or hostile answer from a route service must not fill the memory with samples.
+const ROUTE_BOX = [-125, 31, -113, 43]; // west, south, east, north: California and its edges
+const ROUTE_MAX_MILES = 600;
+const ROUTE_MAX_POINTS = 100000;
+
+/** True when `coords` is a line of [lon, lat] pairs that a drive in California could make. */
+export function usableLine(coords) {
+  if (!Array.isArray(coords) || coords.length < 2 || coords.length > ROUTE_MAX_POINTS) return false;
+  for (const pt of coords) {
+    if (!Array.isArray(pt)) return false;
+    const [lon, lat] = pt;
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
+    if (lon < ROUTE_BOX[0] || lon > ROUTE_BOX[2] || lat < ROUTE_BOX[1] || lat > ROUTE_BOX[3]) return false;
+  }
+  return lineMiles(coords) <= ROUTE_MAX_MILES;
+}
 
 /** Decode an encoded polyline to [lon, lat] pairs. Valhalla uses 6 decimals. */
 export function decodePolyline(text, precision = 6) {
@@ -535,6 +564,7 @@ function axisNear(outline, x, y) {
  * Both come in driving order.
  */
 export function camerasOnRoute(coords, cameras, corridorOf) {
+  if (!usableLine(coords)) return { hits: [], crossed: [] };
   const samples = sampleLine(coords);
   const pts = samples.map((s) => flat([s.lon, s.lat]));
   const hits = [];
@@ -587,15 +617,17 @@ function viaOf(parts) {
   for (const [name, len] of parts) {
     if (name) total.set(name, (total.get(name) ?? 0) + len);
   }
-  return [...total].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([name]) => name).join(' and ');
+  // "I 10 West" reads as "I-10 West", the way the signs and the traffic reports write it.
+  return [...total].sort((a, b) => b[1] - a[1]).slice(0, 2)
+    .map(([name]) => name.replace(/\b(I|US|CA|SR) (\d+)/g, '$1-$2')).join(' and ');
 }
 
 /** One Valhalla trip as a route: { coords, miles, minutes, via }. Null when it has no usable line. */
 export function routeFromValhalla(trip) {
   const leg = trip?.legs?.[0];
-  if (typeof leg?.shape !== 'string') return null;
+  if (typeof leg?.shape !== 'string' || leg.shape.length > 2e6) return null;
   const coords = decodePolyline(leg.shape);
-  if (coords.length < 2) return null;
+  if (!usableLine(coords)) return null;
   const seconds = Number(trip.summary?.time);
   return {
     coords,
@@ -608,7 +640,7 @@ export function routeFromValhalla(trip) {
 /** One OSRM route as a route. */
 export function routeFromOsrm(r) {
   const coords = r?.geometry?.coordinates;
-  if (!Array.isArray(coords) || coords.length < 2) return null;
+  if (!usableLine(coords)) return null;
   const seconds = Number(r.duration);
   return {
     coords,
@@ -644,4 +676,63 @@ export function formatMinutes(min) {
   const h = Math.floor(min / 60);
   const m = Math.round(min - h * 60);
   return m ? `${h} hr ${m} min` : `${h} hr`;
+}
+
+/* ---------- URL state ---------- */
+
+const parsePoint = (pair, label) => {
+  if (!pair || !label) return null;
+  const parts = String(pair).split(',');
+  if (parts.length !== 2) return null;
+  const lat = Number(parts[0]);
+  const lon = Number(parts[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  const clean = String(label).trim().slice(0, 160);
+  return clean ? { lat, lon, label: clean, kind: 'address' } : null;
+};
+
+const fmtPoint = (spot) => `${spot.lat.toFixed(5)},${spot.lon.toFixed(5)}`;
+
+/** Build a query string ("?...") from the current view. GPS positions stay out of the URL. */
+export function formatParams({ mode, origin, radius, trip, selected }) {
+  const p = new URLSearchParams();
+  if (mode === 'trip') {
+    p.set('drive', '1');
+    if (trip?.from?.kind === 'address') {
+      p.set('from', fmtPoint(trip.from));
+      p.set('fromName', trip.from.label);
+    }
+    if (trip?.to?.kind === 'address') {
+      p.set('to', fmtPoint(trip.to));
+      p.set('toName', trip.to.label);
+    }
+    const picked = trip?.routes?.[trip.pick];
+    if (picked?.kind === 'streets') p.set('route', 'streets');
+  } else {
+    if (origin?.kind === 'address') {
+      p.set('at', fmtPoint(origin));
+      p.set('place', origin.label);
+      if (radius !== 2 && RADII.includes(radius)) p.set('mi', String(radius));
+    }
+  }
+  if (selected != null) p.set('cam', String(selected));
+  const qs = p.toString();
+  return qs ? `?${qs}` : '';
+}
+
+/** Read a query string back into initial state fields. Invalid values are ignored. */
+export function parseParams(search) {
+  const p = new URLSearchParams(search || '');
+  const mi = Number(p.get('mi'));
+  const radius = RADII.includes(mi) ? mi : 2;
+  const camRaw = p.get('cam');
+  const selected = camRaw ? (/^\d+$/.test(camRaw) ? Number(camRaw) : camRaw) : null;
+  if (p.get('drive') === '1') {
+    const from = parsePoint(p.get('from'), p.get('fromName'));
+    const to = parsePoint(p.get('to'), p.get('toName'));
+    const routeKind = p.get('route') === 'streets' ? 'streets' : 'fast';
+    return { mode: 'trip', origin: null, radius, from, to, routeKind, selected };
+  }
+  const origin = parsePoint(p.get('at'), p.get('place'));
+  return { mode: 'near', origin, radius, from: null, to: null, routeKind: 'fast', selected };
 }

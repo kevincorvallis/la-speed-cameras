@@ -49,7 +49,7 @@ test.describe('drive form', () => {
     await expect(page.locator('#to')).toBeVisible();
     await expect(page.locator('#near')).toBeHidden();
     await expect(page.locator('#view h1')).toHaveText('Cameras on a drive');
-    await expect(page.locator('.lede')).toContainText('Enter where the drive starts and where it ends.');
+    await expect(page.locator('.lede')).toContainText('Enter the start and the end of the drive.');
     expect((await trip(page)).mode).toBe('trip');
   });
 
@@ -60,7 +60,7 @@ test.describe('drive form', () => {
     await expect(page.locator('.count__n')).toBeVisible();
     await openDrive(page);
     await expect(page.locator('#from')).toHaveValue(START);
-    await expect(page.locator('.lede')).toContainText('Now enter where the drive ends.');
+    await expect(page.locator('.lede')).toContainText('Now enter the end of the drive.');
     await expect(page.locator('.pin--end')).toHaveCount(1);
     expect(await origin(page)).toBeNull();
   });
@@ -102,13 +102,13 @@ test.describe('cameras on a drive', () => {
     // The fastest route is a freeway: no camera. The page must not leave it at that.
     await expect(page.locator('.count__n')).toHaveText('0');
     await expect(page.locator('.count__what')).toContainText(`${START} to ${END}`);
-    await expect(page.locator('.mix')).toContainText('This route runs along no street with a camera.');
+    await expect(page.locator('.mix')).toContainText('The route that avoids freeways passes 6 cameras.');
     await expect(page.locator('.mix')).toContainText('The route that avoids freeways passes 6 cameras.');
     await expect(page.locator('.routes [role="radio"]')).toHaveCount(2);
     await expect(route(page, 0)).toHaveAttribute('aria-checked', 'true');
     await expect(route(page, 0)).toContainText('Fastest route');
     await expect(route(page, 0)).toContainText('without traffic');
-    await expect(route(page, 1)).toContainText('Route that avoids freeways');
+    await expect(route(page, 1)).toContainText('Avoids freeways');
     await expect(page.locator('.cam.is-near')).toHaveCount(0);
     // With a route on the map, a camera that is not on it fades: the map must agree with "0".
     await expect(page.locator('html')).toHaveClass(/has-route/);
@@ -157,10 +157,10 @@ test.describe('cameras on a drive', () => {
     await open(page);
     await drive(page);
     const fold = page.locator('.crossed');
-    await expect(fold.locator('summary')).toHaveText('1 camera street the route only crosses');
+    await expect(fold.locator('summary')).toHaveText('1 street with a camera that the route only crosses');
     await press(fold.locator('summary'));
     await expect(fold.locator('.row__main strong')).toHaveText(fast.crossed);
-    await expect(fold).toContainText('does not count');
+    await expect(fold).toContainText('is not counted');
     // A crossed street is not a camera on the drive.
     await expect(page.locator('.count__n')).toHaveText('0');
   });
@@ -188,14 +188,16 @@ test.describe('cameras on a drive', () => {
     expect(drawn).toEqual({ trip: 1, alt: 1, hits: 6 });
   });
 
-  test('swap reverses the drive', async ({ page }) => {
+  test('swap reverses the drive and keeps the chosen route', async ({ page }) => {
     const { calls } = await open(page);
     await drive(page);
+    await press(route(page, 1));
+    await expect(page.locator('.count__n')).toHaveText('6');
     await press(page.locator('#swap'));
     await expect(page.locator('#from')).toHaveValue(END);
     await expect(page.locator('#to')).toHaveValue(START);
     await expect(page.locator('.count__what')).toContainText(`${END} to ${START}`);
-    await press(route(page, 1));
+    await expect(route(page, 1)).toHaveAttribute('aria-checked', 'true');
     await expect(page.locator('.count__n')).toHaveText('6');
     expect(await rows(page)).toEqual([...streets.hits].reverse());
     const last = calls.drives.at(-1);
@@ -203,12 +205,54 @@ test.describe('cameras on a drive', () => {
     expect(last.to.lat).toBeCloseTo(PLACES.spring.lat, 4);
   });
 
+  test('clear buttons reset each end without closing the drive', async ({ page }) => {
+    await open(page);
+    await drive(page);
+    await expect(page.locator('#clear-from')).toBeVisible();
+    await expect(page.locator('#clear-to')).toBeVisible();
+    await press(page.locator('#clear-to'));
+    await expect(page.locator('#to')).toHaveValue('');
+    await expect(page.locator('#clear-to')).toBeHidden();
+    await expect(page.locator('#from')).toHaveValue(START);
+    await expect(page.locator('.lede')).toContainText('Now enter the end of the drive.');
+    await press(page.locator('#clear-from'));
+    await expect(page.locator('#from')).toHaveValue('');
+    await expect(page.locator('#clear-from')).toBeHidden();
+    await expect(page.locator('.lede')).toContainText('Enter the start and the end of the drive.');
+    await expect(page.locator('.pin--end')).toHaveCount(0);
+    expect(await trip(page)).toMatchObject({ mode: 'trip', phase: 'idle' });
+  });
+
+  test('opening a crossed camera and going back keeps the crossed list open', async ({ page }) => {
+    await open(page);
+    await drive(page);
+    const fold = page.locator('.crossed');
+    await press(fold.locator('summary'));
+    await press(fold.locator('.row').first());
+    await expect(page.locator('.facts')).toContainText('Not counted');
+    await press(page.locator('[data-back]'));
+    await expect(fold).toHaveAttribute('open', '');
+    await expect(fold.locator('.row').first()).toBeFocused();
+  });
+
+  test('reloading keeps the drive and chosen route in the URL', async ({ page }) => {
+    await open(page);
+    await drive(page);
+    await press(route(page, 1));
+    await expect(page.locator('.count__n')).toHaveText('6');
+    await page.reload();
+    await expect(page.locator('.count__n')).toHaveText('6');
+    await expect(page.locator('#from')).toHaveValue(START);
+    await expect(page.locator('#to')).toHaveValue(END);
+    await expect(route(page, 1)).toHaveAttribute('aria-checked', 'true');
+  });
+
   test('an emptied field drops that end and the routes', async ({ page }) => {
     await open(page);
     await drive(page);
     await page.locator('#to').fill('');
     await expect(page.locator('#view h1')).toHaveText('Cameras on a drive');
-    await expect(page.locator('.lede')).toContainText('Now enter where the drive ends.');
+    await expect(page.locator('.lede')).toContainText('Now enter the end of the drive.');
     await expect(page.locator('.pin--end')).toHaveCount(1);
     expect(await trip(page)).toMatchObject({ phase: 'idle', routes: [], from: START });
     expect((await trip(page)).to).toBeUndefined();
@@ -232,6 +276,40 @@ test.describe('cameras on a drive', () => {
     expect(calls.filter((url) => url.includes('valhalla'))).toEqual(Array(2).fill('https://valhalla1.openstreetmap.de/route'));
     expect(calls.drives.map((d) => d.method)).toEqual(['POST', 'POST']);
     expect(calls.drives.map((d) => d.streets).sort()).toEqual([false, true]);
+  });
+});
+
+test.describe('content security policy', () => {
+  test('an address search and a drive break no rule of the policy', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__blocked = [];
+      addEventListener('securitypolicyviolation', (e) => window.__blocked.push(`${e.violatedDirective} ${e.blockedURI}`));
+    });
+    const { errors } = await open(page);
+    await page.locator('#q').fill('6300 mel');
+    await press(option(page, '6300 Melrose'));
+    await expect(page.locator('.count__n')).toBeVisible();
+    await openDrive(page);
+    await setEnd(page, '#to', '200 n', '200 North Spring');
+    await expect(page.locator('.routes [role="radio"]')).toHaveCount(2);
+    await press(route(page, 1));
+    await expect(page.locator('.count__n')).toHaveText('1');
+    expect(await page.evaluate(() => window.__blocked)).toEqual([]);
+    expect(await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute('content')).toContain("script-src 'self'");
+    expect(errors).toEqual([]);
+  });
+
+  test('the policy blocks a script the page did not ship', async ({ page }) => {
+    await open(page);
+    const blocked = await page.evaluate(() => new Promise((resolve) => {
+      addEventListener('securitypolicyviolation', (e) => resolve(e.violatedDirective), { once: true });
+      const tag = document.createElement('script');
+      tag.textContent = 'window.__ran = true';
+      document.head.append(tag);
+      setTimeout(() => resolve(window.__ran ? 'ran' : 'no event'), 1500);
+    }));
+    expect(blocked).toContain('script-src');
+    expect(await page.evaluate(() => window.__ran)).toBeUndefined();
   });
 });
 
