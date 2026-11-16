@@ -1293,7 +1293,8 @@ function pickRoute(i) {
   render();
   handMoved = false;
   frameResults();
-  el.view.querySelector('.routes [aria-checked="true"]')?.focus();
+  // Keep the list at its top: a plain focus would scroll the count half out of view.
+  el.view.querySelector('.routes [aria-checked="true"]')?.focus({ preventScroll: true });
   announce(tripSummary());
 }
 

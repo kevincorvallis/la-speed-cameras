@@ -117,6 +117,8 @@ test.describe('cameras on a drive', () => {
     await press(route(page, 1));
     await expect(page.locator('.count__n')).toHaveText('6');
     await expect(page.locator('#status')).toHaveText(/6 cameras on this route/);
+    // The count stays in view: picking a route must not scroll it under the top of the panel.
+    expect(await page.locator('#body').evaluate((node) => node.scrollTop)).toBe(0);
     expect(await rows(page)).toEqual(streets.hits);
     await expect(page.locator('#view > ol.cams .dist').first()).toHaveText('at 1.2 mi');
     await expect(page.locator('.cam.is-near')).toHaveCount(6);
