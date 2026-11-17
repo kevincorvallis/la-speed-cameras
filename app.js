@@ -1,6 +1,3 @@
-// The map code is the largest file by far. It loads beside the camera data (index.html preloads both),
-// and the panel shows the counts before it arrives: the counts are the first thing a person reads.
-const maplibre = import('./vendor/maplibre-gl.mjs');
 import {
   RADII, statusOf, tally, countOn, districtAt, cameraDistance, circle, formatMiles, plural,
   cleanQuery, placeFromText, placeFromPhoton, placeFromCandidate, looksLike, mergeSuggestions,
@@ -108,9 +105,14 @@ if (!location.search) {
   el.view.querySelector('.lede').innerHTML = `${esc(overviewLede())}${OVERVIEW_HINT}`;
 }
 
+// The map code is the largest file by far. index.html preloads it beside the camera data, so it is
+// fetched and compiled by now, but running it holds the page for a while on a slow phone. Let the
+// panel paint first: the counts are the first thing a person reads. (A tab in the background gets
+// no frames, so a timer stands in.)
+await new Promise((resolve) => { requestAnimationFrame(() => setTimeout(resolve, 0)); setTimeout(resolve, 120); });
 const {
   Map: GLMap, Marker, LngLatBounds, AttributionControl, NavigationControl,
-} = await maplibre;
+} = await import('./vendor/maplibre-gl.mjs');
 
 // The stretch of street each camera watches, by camera oid.
 const corridorOf = new Map(corridors.features.map((f) => [f.properties.oid, f.geometry]));
