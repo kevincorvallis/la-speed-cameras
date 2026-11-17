@@ -127,6 +127,8 @@ for (const f of city.features) {
 const map = new GLMap({
   container: 'map',
   style: MAP_STYLE,
+  // A 3x phone screen draws 2.25 times the pixels of a 2x one, for no visible gain on a street map.
+  pixelRatio: Math.min(devicePixelRatio || 1, 2),
   bounds: cityBounds,
   fitBoundsOptions: { padding: mapPadding() },
   attributionControl: false,
@@ -481,6 +483,10 @@ function rowHTML(cam, side = null) {
   </button></li>`;
 }
 
+const SHARE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3.5"/><path d="m7.5 8 4.5-4.5L16.5 8"/><path d="M5 12.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19v-6.5"/></svg>';
+/** A button that shares the page as it is now: the address, the drive or the camera are in the link. */
+const shareHTML = (label = 'Share') => `<button type="button" class="btn btn--quiet" data-share>${SHARE_ICON}<span>${label}</span></button>`;
+
 const mapNotice = () => (state.mapDown
   ? '<p class="notice">The street map did not load. The counts and the list still work.</p>'
   : '');
@@ -496,11 +502,14 @@ function overviewHTML() {
   const byStreet = [...state.cameras].sort((a, b) => a.street.localeCompare(b.street) || a.from.localeCompare(b.from));
   return `
     <h1>Speed cameras in Los Angeles</h1>
-    <p class="lede">${lede} Enter an address to count the cameras near it, or map a drive to see the cameras on the way.</p>
-    <button type="button" class="btn" data-trip>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21v-8a4 4 0 0 1 4-4h9"/><path d="m15 4.5 4.5 4.5-4.5 4.5"/></svg>
-      Map a drive
-    </button>
+    <p class="lede">${lede}<span class="wide-only"> Enter an address to count the cameras near it, or map a drive to see the cameras on the way.</span></p>
+    <div class="actions">
+      <button type="button" class="btn" data-trip>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21v-8a4 4 0 0 1 4-4h9"/><path d="m15 4.5 4.5 4.5-4.5 4.5"/></svg>
+        Map a drive
+      </button>
+      <button type="button" class="btn btn--quiet" data-locate><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="1.6" class="fill"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>Near me</button>
+    </div>
     ${mapNotice()}
     <ul class="legend">
       ${tally(state.cameras).map(({ st, n }) => `<li data-status="${st.key}">
@@ -545,6 +554,7 @@ function resultsHTML() {
       <span class="count__what">${near.length === 1 ? 'camera' : 'cameras'} within ${span} <small>${where}</small></span>
     </h1>
     <p class="mix">${mix}</p>
+    ${o.kind === 'address' ? `<div class="actions actions--tight">${shareHTML('Share these results')}</div>` : ''}
     ${notice}${mapNotice()}
     <div class="seg" role="radiogroup" aria-label="Distance from the ${place}">
       ${RADII.map((r) => `<button type="button" role="radio" aria-checked="${r === state.radius}" tabindex="${r === state.radius ? 0 : -1}" data-radius="${r}">${plural(r, 'mile')}</button>`).join('')}
@@ -600,7 +610,11 @@ function detailHTML(cam) {
     </div>
     ${mapNotice()}
     <dl class="facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>
-    <a class="btn" href="https://www.google.com/maps/search/?api=1&query=${lat},${lon}" target="_blank" rel="noopener">Open in Google Maps</a>`;
+    <div class="actions">
+      <a class="btn" href="https://www.google.com/maps/search/?api=1&query=${lat},${lon}" target="_blank" rel="noopener" aria-label="Open in Google Maps">Google Maps</a>
+      <a class="btn btn--quiet" href="https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}" target="_blank" rel="noopener">Street View</a>
+      ${shareHTML()}
+    </div>`;
 }
 
 /** Fines, counting rules and source. Drawn apart from the view, so it keeps its open state and place. */
@@ -652,6 +666,28 @@ function rerender() {
   if (hadFocus) focusHeading();
 }
 
+/** Share the link to this view: the phone's share sheet, or a copy of the link. */
+async function shareView(button) {
+  const url = location.href;
+  const title = document.title;
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+    try { await navigator.share({ title, url }); } catch { /* closed without sharing */ }
+    return;
+  }
+  const label = button.querySelector('span');
+  const before = label.textContent;
+  try {
+    await navigator.clipboard.writeText(url);
+    label.textContent = 'Link copied';
+    announce('Link copied.');
+  } catch {
+    label.textContent = 'Copy the address bar';
+    announce('This browser blocked the copy. Copy the link from the address bar.');
+  }
+  clearTimeout(button.copyTimer);
+  button.copyTimer = setTimeout(() => { if (button.isConnected) label.textContent = before; }, 2400);
+}
+
 el.view.addEventListener('click', (e) => {
   const row = e.target.closest('[data-oid]');
   if (row) {
@@ -664,6 +700,9 @@ el.view.addEventListener('click', (e) => {
   const route = e.target.closest('[data-route]');
   if (route) { pickRoute(Number(route.dataset.route)); return; }
   if (e.target.closest('[data-trip]')) { openTrip(); return; }
+  if (e.target.closest('[data-locate]')) { useMyLocation(el.input, el.locate); return; }
+  const share = e.target.closest('[data-share]');
+  if (share) { shareView(share); return; }
   if (e.target.closest('[data-retry]')) { planTrip(); return; }
   if (e.target.closest('[data-back]')) select(null);
 });
@@ -1224,7 +1263,8 @@ function tripHTML() {
   const t = state.trip;
   const ends = t.from && t.to ? `${esc(spotName(t.from))} to ${esc(spotName(t.to))}` : '';
   if (t.phase === 'loading') {
-    return `<h1>Finding the route</h1><p class="lede">From ${ends}.</p>${mapNotice()}`;
+    return `<h1>Finding the route</h1><p class="lede">From ${ends}.</p>${mapNotice()}
+      <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>`;
   }
   if (t.phase === 'failed') {
     return `<h1>The route did not load</h1>
@@ -1281,6 +1321,7 @@ function tripHTML() {
       <span class="count__what">${n === 1 ? 'camera' : 'cameras'} on this route <small>${ends.charAt(0).toUpperCase()}${ends.slice(1)}</small></span>
     </h1>
     <p class="mix">${mix}</p>
+    ${t.from?.kind === 'address' && t.to?.kind === 'address' ? `<div class="actions actions--tight">${shareHTML('Share this drive')}</div>` : ''}
     ${notice}${mapNotice()}
     ${chooser}
     ${n ? `<h2>On the way, in driving order</h2><ol class="cams">${hits.map(row).join('')}</ol>` : ''}
@@ -1450,6 +1491,15 @@ el.swap.addEventListener('click', () => {
   dismiss();
   planTrip({ preferKind });
   announce('Start and end swapped.');
+});
+
+// "/" jumps to the search field, as on most map sites. Not while typing in a field.
+addEventListener('keydown', (e) => {
+  if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+  e.preventDefault();
+  (state.mode === 'trip' ? (el.from.value ? el.to : el.from) : el.input).focus();
 });
 
 /* ---------- Start ---------- */
