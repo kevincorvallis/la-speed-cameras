@@ -755,7 +755,7 @@ function snapHeights() {
   const vh = window.innerHeight;
   const top = el.search.getBoundingClientRect().bottom;
   const full = Math.max(200, Math.round(vh - top - 10));
-  return { peek: Math.min(176, full), half: Math.min(Math.round(vh * 0.5), full), full };
+  return { peek: Math.min(188, full), half: Math.min(Math.round(vh * 0.5), full), full };
 }
 
 function setSheet(name) {

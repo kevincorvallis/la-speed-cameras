@@ -32,7 +32,7 @@
   --build: #69717a;
   --font: "Overpass", "Helvetica Neue", Arial, sans-serif;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --sheet-h: 176px;
+  --sheet-h: 188px;
   --safe-t: env(safe-area-inset-top, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
