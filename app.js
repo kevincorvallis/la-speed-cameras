@@ -1,6 +1,6 @@
-import {
-  Map as GLMap, Marker, LngLatBounds, AttributionControl, NavigationControl,
-} from './vendor/maplibre-gl.mjs';
+// The map code is the largest file by far. It loads beside the camera data (index.html preloads both),
+// and the panel shows the counts before it arrives: the counts are the first thing a person reads.
+const maplibre = import('./vendor/maplibre-gl.mjs');
 import {
   RADII, statusOf, tally, countOn, districtAt, cameraDistance, circle, formatMiles, plural,
   cleanQuery, placeFromText, placeFromPhoton, placeFromCandidate, looksLike, mergeSuggestions,
@@ -28,6 +28,8 @@ const SIGN_ZOOM = 12.2; // dots turn into signs past this zoom
 const FAR_MILES = 60; // past this, the address is not in the LA area at all
 const SHEET_NAMES = ['peek', 'half', 'full'];
 const SHEET_WORDS = { peek: 'small', half: 'medium', full: 'large' };
+// On a phone the sheet hides this sentence: the buttons under it say the same.
+const OVERVIEW_HINT = '<span class="wide-only"> Enter an address to count the cameras near it, or map a drive to see the cameras on the way.</span>';
 
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // Same query as the phone block in styles.css. A short, wide screen keeps the side panel.
@@ -101,6 +103,15 @@ state.cameras = snapshot.cameras;
 state.source.savedAt = snapshot.savedAt;
 state.source.editedAt = snapshot.ladotEditedAt;
 
+// The overview's opening line, in the panel now. render() draws the full view once the map code is in.
+if (!location.search) {
+  el.view.querySelector('.lede').innerHTML = `${esc(overviewLede())}${OVERVIEW_HINT}`;
+}
+
+const {
+  Map: GLMap, Marker, LngLatBounds, AttributionControl, NavigationControl,
+} = await maplibre;
+
 // The stretch of street each camera watches, by camera oid.
 const corridorOf = new Map(corridors.features.map((f) => [f.properties.oid, f.geometry]));
 
@@ -140,7 +151,8 @@ const map = new GLMap({
 });
 map.touchZoomRotate.disableRotation();
 map.keyboard.disableRotation();
-map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
+// On a phone the credit sits bottom left. It opens and closes as the map loads, and there it moves nothing else.
+map.addControl(new AttributionControl({ compact: true }), phone.matches ? 'bottom-left' : 'bottom-right');
 map.addControl(new NavigationControl({ showCompass: false }), 'bottom-right');
 
 const move = (opts) => (reduceMotion ? { ...opts, duration: 0 } : opts);
@@ -491,18 +503,24 @@ const mapNotice = () => (state.mapDown
   ? '<p class="notice">The street map did not load. The counts and the list still work.</p>'
   : '');
 
-function overviewHTML() {
+/** The overview's first sentence. Plain text: it also fills the panel before the map code loads. */
+function overviewLede() {
   const total = state.cameras.length;
   const on = countOn(state.cameras);
-  const lede = on === 0
+  return on === 0
     ? `The city plans ${total} cameras. LADOT lists none as active yet.`
     : on === total
       ? `LADOT lists all ${total} city cameras as active.`
       : `The city plans ${total} cameras. LADOT lists ${on} as active.`;
+}
+
+function overviewHTML() {
+  const total = state.cameras.length;
+  const lede = overviewLede();
   const byStreet = [...state.cameras].sort((a, b) => a.street.localeCompare(b.street) || a.from.localeCompare(b.from));
   return `
     <h1>Speed cameras in Los Angeles</h1>
-    <p class="lede">${lede}<span class="wide-only"> Enter an address to count the cameras near it, or map a drive to see the cameras on the way.</span></p>
+    <p class="lede">${lede}${OVERVIEW_HINT}</p>
     <div class="actions">
       <button type="button" class="btn" data-trip>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21v-8a4 4 0 0 1 4-4h9"/><path d="m15 4.5 4.5 4.5-4.5 4.5"/></svg>
