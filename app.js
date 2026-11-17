@@ -93,7 +93,8 @@ async function getJSON(url, ms = 9000) {
 const [snapshot, corridors, city] = await Promise.all([
   getJSON('data/cameras.json'), getJSON('data/corridors.geojson'), getJSON('data/city.geojson'),
 ]).catch((err) => {
-  el.view.innerHTML = '<h1>The camera data did not load</h1><p class="lede">Check the connection, then reload the page.</p>';
+  el.view.removeAttribute('aria-busy');
+  el.view.innerHTML = '<h1>The camera data did not load</h1><p class="lede">Check the connection, then try again.</p><a class="btn" href="">Try again</a>';
   throw err;
 });
 state.cameras = snapshot.cameras;
@@ -635,6 +636,7 @@ function renderFoot() {
 
 function render() {
   const cam = state.selected != null && state.cameras.find((c) => c.oid === state.selected);
+  el.view.removeAttribute('aria-busy');
   el.view.innerHTML = cam ? detailHTML(cam)
     : state.mode === 'trip' ? tripHTML()
       : state.origin ? resultsHTML() : overviewHTML();

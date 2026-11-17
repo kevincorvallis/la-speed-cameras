@@ -4,15 +4,43 @@
   <meta charset="utf-8">
   <!-- The page may load code only from this site, and may call only the services it names.
        A new outside service needs its host added here. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://services.arcgis.com https://geocode.gis.lacounty.gov https://photon.komoot.io https://valhalla1.openstreetmap.de https://routing.openstreetmap.de https://tiles.openfreemap.org; base-uri 'none'; object-src 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://services.arcgis.com https://geocode.gis.lacounty.gov https://photon.komoot.io https://valhalla1.openstreetmap.de https://routing.openstreetmap.de https://tiles.openfreemap.org; base-uri 'none'; object-src 'none'; form-action 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>LA speed cameras near you</title>
-  <meta name="description" content="Enter an address, or map a drive. See how many Los Angeles speed cameras are near it and where each one stands.">
+  <title>LA Speed Cams: Los Angeles speed cameras near you</title>
+  <meta name="description" content="See every Los Angeles speed camera on a map. Enter an address to count the cameras near it, or map a drive to see the cameras on the way. Live LADOT data.">
+  <link rel="canonical" href="https://laspeedcams.com/">
   <meta name="theme-color" content="#00664f">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='1.5' width='22' height='29' rx='3.5' fill='%23fff' stroke='%2315181b' stroke-width='2.5'/%3E%3Ctext x='16' y='22.5' font-family='Arial,sans-serif' font-size='13' font-weight='700' text-anchor='middle' fill='%2315181b'%3E35%3C/text%3E%3C/svg%3E">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400..900&display=swap" rel="stylesheet">
+  <meta name="color-scheme" content="light">
+  <meta name="format-detection" content="telephone=no">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="LA Speed Cams">
+  <meta property="og:url" content="https://laspeedcams.com/">
+  <meta property="og:title" content="LA Speed Cams: every Los Angeles speed camera on one map">
+  <meta property="og:description" content="Enter an address to count the speed cameras near it, or map a drive to see the cameras on the way.">
+  <meta property="og:image" content="https://laspeedcams.com/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="A map of Los Angeles with its speed cameras, and a panel counting the cameras near an address.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="LA Speed Cams: every Los Angeles speed camera on one map">
+  <meta name="twitter:description" content="Enter an address to count the speed cameras near it, or map a drive to see the cameras on the way.">
+  <meta name="twitter:image" content="https://laspeedcams.com/og.png">
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <!-- The first screen needs the font, the map code and the saved camera data. Start them all now,
+       not one after another. -->
+  <link rel="preload" href="fonts/overpass-latin-v19.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="modulepreload" href="app.js">
+  <link rel="modulepreload" href="lib.js">
+  <link rel="modulepreload" href="vendor/maplibre-gl.mjs">
+  <link rel="preload" href="data/cameras.json" as="fetch" crossorigin>
+  <link rel="preload" href="data/corridors.geojson" as="fetch" crossorigin>
+  <link rel="preload" href="data/city.geojson" as="fetch" crossorigin>
+  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
+  <link rel="preconnect" href="https://services.arcgis.com" crossorigin>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"LA Speed Cams","url":"https://laspeedcams.com/","applicationCategory":"TravelApplication","operatingSystem":"Any","description":"A map of the Los Angeles speed cameras. Count the cameras near an address, or on a drive.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
   <link rel="stylesheet" href="vendor/maplibre-gl.css">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -74,7 +102,12 @@
     <section class="panel" id="panel" aria-label="Cameras">
       <button type="button" class="panel__grip" id="grip" aria-label="Panel size: small. Press to change the size."><span></span></button>
       <div class="panel__body" id="body">
-        <div id="view"></div>
+        <div id="view" aria-busy="true">
+          <!-- What shows until app.js takes over: the heading, and a quiet placeholder for the counts. -->
+          <h1>Speed cameras in Los Angeles</h1>
+          <p class="lede">Loading the cameras…</p>
+          <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+        </div>
         <div class="foot" id="foot"></div>
       </div>
     </section>

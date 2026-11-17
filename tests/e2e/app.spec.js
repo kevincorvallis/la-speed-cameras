@@ -372,7 +372,7 @@ test.describe('address finders', () => {
     await search(page, '6300 mel', '6300 Melrose Ave');
     const hosts = [...new Set(calls.map((u) => new URL(u).hostname))].sort();
     for (const host of hosts) {
-      expect(['fonts.googleapis.com', 'fonts.gstatic.com', 'geocode.gis.lacounty.gov', 'photon.komoot.io', 'services.arcgis.com', 'tiles.openfreemap.org']).toContain(host);
+      expect(['geocode.gis.lacounty.gov', 'photon.komoot.io', 'services.arcgis.com', 'tiles.openfreemap.org']).toContain(host);
     }
     expect(hosts).toContain('services.arcgis.com');
     expect(hosts).toContain('geocode.gis.lacounty.gov');
