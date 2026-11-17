@@ -221,3 +221,11 @@ test.describe('accessibility scan', () => {
     expect(serious(await scan(page))).toEqual([]);
   });
 });
+
+test.describe('a link that goes nowhere', () => {
+  test('the 404 page leads back to the map', async ({ page }) => {
+    await page.goto('/404.html');
+    await expect(page.locator('h1')).toHaveText('This page does not exist');
+    await expect(page.getByRole('link', { name: 'Open the map' })).toHaveAttribute('href', '/');
+  });
+});

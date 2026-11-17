@@ -743,3 +743,8 @@ button.btn { border: 0; }
   #near .search__icon { display: none; }
   .search__trip .search__row { padding-left: 7px; padding-right: 3px; }
 }
+
+/* The page for a link that goes nowhere (404.html) */
+body.lost { display: grid; place-items: center; padding: 24px; overflow: auto; }
+.lost__card { max-width: 420px; padding: 32px 28px; border-radius: 14px; background: var(--paper); box-shadow: 0 0 0 1px var(--line), 0 12px 32px rgba(21, 24, 27, 0.14); }
+.lost__card img { display: block; margin-bottom: 18px; }
