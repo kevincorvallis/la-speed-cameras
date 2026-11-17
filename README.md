@@ -8,7 +8,7 @@ This is not a city website. The camera data comes from LADOT.
 
 Live site: https://laspeedcams.com
 
-![The map after a search for 200 N Spring St](screenshots/desktop.png)
+![The map after a search for 6300 Melrose Ave](screenshots/desktop.png)
 
 ## Run it
 
