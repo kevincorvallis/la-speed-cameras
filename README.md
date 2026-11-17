@@ -6,9 +6,9 @@ Or map a drive, such as a commute. The map counts the cameras on the route, in d
 
 This is not a city website. The camera data comes from LADOT.
 
-Live site: https://la-speed-cameras-nine.vercel.app
+Live site: https://laspeedcams.com
 
-![The map after a search for 200 N Spring St](screenshots/desktop.png)
+![The map after a search for 6300 Melrose Ave](screenshots/desktop.png)
 
 ## Run it
 
@@ -37,7 +37,7 @@ npm test
 | lint | `npm run test:lint` | The scripts parse |
 | unit | `npm run test:unit` | `lib.js` (status, distance, address matching, live-data merge, sign layout, routes) and the files in `data/` |
 | build | `npm run test:py` | The join in `scripts/build_data.py` |
-| browser | `npm run test:e2e` | The page in Chromium and WebKit at six screen sizes |
+| browser | `npm run test:e2e` | The page in Chromium and WebKit at six screen sizes, with an axe accessibility scan of each view |
 
 The browser suite fakes every outside host (`tests/e2e/mocks.js`), so it needs no network. It starts its own server on port 4174.
 

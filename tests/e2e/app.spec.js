@@ -200,7 +200,7 @@ test.describe('camera detail', () => {
     await expect(page.locator('.facts')).toContainText('From the address');
     await expect(page.locator('.cam.is-selected')).toHaveCount(1);
     await expect(page.locator('.cam.is-selected .cam__btn')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.locator('#view a.btn')).toHaveAttribute('href', /^https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=-?[\d.]+,-?[\d.]+$/);
+    await expect(page.getByRole('link', { name: 'Open in Google Maps' })).toHaveAttribute('href', /^https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=-?[\d.]+,-?[\d.]+$/);
     await press(page.locator('.back'));
     await expect(page.locator('.count__n')).toHaveText(String(expectedNear(PLACES.melrose, 2)));
     await expect(page.locator('#view .cams .row').first()).toBeFocused();
@@ -372,7 +372,7 @@ test.describe('address finders', () => {
     await search(page, '6300 mel', '6300 Melrose Ave');
     const hosts = [...new Set(calls.map((u) => new URL(u).hostname))].sort();
     for (const host of hosts) {
-      expect(['fonts.googleapis.com', 'fonts.gstatic.com', 'geocode.gis.lacounty.gov', 'photon.komoot.io', 'services.arcgis.com', 'tiles.openfreemap.org']).toContain(host);
+      expect(['geocode.gis.lacounty.gov', 'photon.komoot.io', 'services.arcgis.com', 'tiles.openfreemap.org']).toContain(host);
     }
     expect(hosts).toContain('services.arcgis.com');
     expect(hosts).toContain('geocode.gis.lacounty.gov');

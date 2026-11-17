@@ -1,5 +1,24 @@
 /* Palette and type come from road signs:
    regulatory white and black, guide green, warning yellow, stop red. */
+/* Overpass, the type of US highway signs. Served from this site (fonts/, SIL Open Font License).
+   One variable file per script covers every weight. */
+@font-face {
+  font-family: "Overpass";
+  font-style: normal;
+  font-weight: 400 900;
+  font-display: swap;
+  src: url("fonts/overpass-latin-v19.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Overpass";
+  font-style: normal;
+  font-weight: 400 900;
+  font-display: swap;
+  src: url("fonts/overpass-latin-ext-v19.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 :root {
   --ink: #15181b;
   --asphalt: #59616a;
@@ -13,7 +32,7 @@
   --build: #69717a;
   --font: "Overpass", "Helvetica Neue", Arial, sans-serif;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --sheet-h: 176px;
+  --sheet-h: 188px;
   --safe-t: env(safe-area-inset-top, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
@@ -397,6 +416,18 @@ h2 {
 .lede { margin-top: 10px; font-size: 16px; max-width: 34ch; }
 .hint { margin-top: 18px; color: var(--asphalt); }
 
+/* Placeholder rows while the camera data loads. Same height as the legend that replaces them. */
+.skeleton { display: grid; gap: 10px; margin-top: 22px; }
+.skeleton span {
+  height: 44px;
+  border-radius: 9px;
+  background: linear-gradient(90deg, var(--wash) 25%, #f8f9f6 50%, var(--wash) 75%) 0 0 / 300% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+.skeleton span:first-child { width: 42%; height: 40px; border-radius: 10px; }
+@keyframes shimmer { to { background-position: -150% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton span { animation: none; } }
+
 /* Legend */
 .legend { margin-top: 18px; border-top: 1px solid var(--line); }
 .legend li {
@@ -566,7 +597,15 @@ h2 {
 }
 .btn:hover { background: #000; }
 button.btn { border: 0; }
-.btn svg { width: 20px; height: 20px; margin: -2px 8px 0 -2px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.btn--quiet { background: var(--wash); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.btn--quiet:hover { background: #e6e9e3; }
+.btn--quiet svg .fill { fill: currentColor; stroke: none; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.actions .btn { margin-top: 0; }
+.actions--tight { margin-top: 12px; }
+.actions--tight .btn { height: 34px; padding: 2px 12px 0; border-radius: 9px; font-size: 14px; font-weight: 600; }
+.actions--tight .btn svg { width: 17px; height: 17px; margin-right: 6px; }
+.btn svg { flex: none; width: 20px; height: 20px; margin: -2px 8px 0 -2px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Route choices: one row for each route, with its camera count */
 .routes { display: grid; gap: 8px; margin-top: 18px; }
@@ -686,6 +725,8 @@ button.btn { border: 0; }
   .panel__body { padding: 2px 20px calc(var(--safe-b) + 20px); }
 
   h1 { font-size: 22px; }
+  /* The small sheet shows the heading, the counts and the two buttons. The buttons say the rest. */
+  .wide-only { display: none; }
   .count { font-size: 20px; }
   .count__n { font-size: 80px; }
 
@@ -702,3 +743,8 @@ button.btn { border: 0; }
   #near .search__icon { display: none; }
   .search__trip .search__row { padding-left: 7px; padding-right: 3px; }
 }
+
+/* The page for a link that goes nowhere (404.html) */
+body.lost { display: grid; place-items: center; padding: 24px; overflow: auto; }
+.lost__card { max-width: 420px; padding: 32px 28px; border-radius: 14px; background: var(--paper); box-shadow: 0 0 0 1px var(--line), 0 12px 32px rgba(21, 24, 27, 0.14); }
+.lost__card img { display: block; margin-bottom: 18px; }

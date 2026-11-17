@@ -1,0 +1,16 @@
+{
+  "name": "LA Speed Cams",
+  "short_name": "LA Speed Cams",
+  "description": "Los Angeles speed cameras near an address, or on a drive.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f1f3ef",
+  "theme_color": "#00664f",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

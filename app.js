@@ -1,7 +1,4 @@
 import {
-  Map as GLMap, Marker, LngLatBounds, AttributionControl, NavigationControl,
-} from './vendor/maplibre-gl.mjs';
-import {
   RADII, statusOf, tally, countOn, districtAt, cameraDistance, circle, formatMiles, plural,
   cleanQuery, placeFromText, placeFromPhoton, placeFromCandidate, looksLike, mergeSuggestions,
   decideOnEnter, decideFromSuggestions, mergeLive, signature, layoutSigns, snapFor,
@@ -28,6 +25,8 @@ const SIGN_ZOOM = 12.2; // dots turn into signs past this zoom
 const FAR_MILES = 60; // past this, the address is not in the LA area at all
 const SHEET_NAMES = ['peek', 'half', 'full'];
 const SHEET_WORDS = { peek: 'small', half: 'medium', full: 'large' };
+// On a phone the sheet hides this sentence: the buttons under it say the same.
+const OVERVIEW_HINT = '<span class="wide-only"> Enter an address to count the cameras near it, or map a drive to see the cameras on the way.</span>';
 
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // Same query as the phone block in styles.css. A short, wide screen keeps the side panel.
@@ -93,12 +92,27 @@ async function getJSON(url, ms = 9000) {
 const [snapshot, corridors, city] = await Promise.all([
   getJSON('data/cameras.json'), getJSON('data/corridors.geojson'), getJSON('data/city.geojson'),
 ]).catch((err) => {
-  el.view.innerHTML = '<h1>The camera data did not load</h1><p class="lede">Check the connection, then reload the page.</p>';
+  el.view.removeAttribute('aria-busy');
+  el.view.innerHTML = '<h1>The camera data did not load</h1><p class="lede">Check the connection, then try again.</p><a class="btn" href="">Try again</a>';
   throw err;
 });
 state.cameras = snapshot.cameras;
 state.source.savedAt = snapshot.savedAt;
 state.source.editedAt = snapshot.ladotEditedAt;
+
+// The overview's opening line, in the panel now. render() draws the full view once the map code is in.
+if (!location.search) {
+  el.view.querySelector('.lede').innerHTML = `${esc(overviewLede())}${OVERVIEW_HINT}`;
+}
+
+// The map code is the largest file by far. index.html preloads it beside the camera data, so it is
+// fetched and compiled by now, but running it holds the page for a while on a slow phone. Let the
+// panel paint first: the counts are the first thing a person reads. (A tab in the background gets
+// no frames, so a timer stands in.)
+await new Promise((resolve) => { requestAnimationFrame(() => setTimeout(resolve, 0)); setTimeout(resolve, 120); });
+const {
+  Map: GLMap, Marker, LngLatBounds, AttributionControl, NavigationControl,
+} = await import('./vendor/maplibre-gl.mjs');
 
 // The stretch of street each camera watches, by camera oid.
 const corridorOf = new Map(corridors.features.map((f) => [f.properties.oid, f.geometry]));
@@ -126,6 +140,8 @@ for (const f of city.features) {
 const map = new GLMap({
   container: 'map',
   style: MAP_STYLE,
+  // A 3x phone screen draws 2.25 times the pixels of a 2x one, for no visible gain on a street map.
+  pixelRatio: Math.min(devicePixelRatio || 1, 2),
   bounds: cityBounds,
   fitBoundsOptions: { padding: mapPadding() },
   attributionControl: false,
@@ -137,7 +153,8 @@ const map = new GLMap({
 });
 map.touchZoomRotate.disableRotation();
 map.keyboard.disableRotation();
-map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
+// On a phone the credit sits bottom left. It opens and closes as the map loads, and there it moves nothing else.
+map.addControl(new AttributionControl({ compact: true }), phone.matches ? 'bottom-left' : 'bottom-right');
 map.addControl(new NavigationControl({ showCompass: false }), 'bottom-right');
 
 const move = (opts) => (reduceMotion ? { ...opts, duration: 0 } : opts);
@@ -480,26 +497,39 @@ function rowHTML(cam, side = null) {
   </button></li>`;
 }
 
+const SHARE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3.5"/><path d="m7.5 8 4.5-4.5L16.5 8"/><path d="M5 12.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19v-6.5"/></svg>';
+/** A button that shares the page as it is now: the address, the drive or the camera are in the link. */
+const shareHTML = (label = 'Share') => `<button type="button" class="btn btn--quiet" data-share>${SHARE_ICON}<span>${label}</span></button>`;
+
 const mapNotice = () => (state.mapDown
   ? '<p class="notice">The street map did not load. The counts and the list still work.</p>'
   : '');
 
-function overviewHTML() {
+/** The overview's first sentence. Plain text: it also fills the panel before the map code loads. */
+function overviewLede() {
   const total = state.cameras.length;
   const on = countOn(state.cameras);
-  const lede = on === 0
+  return on === 0
     ? `The city plans ${total} cameras. LADOT lists none as active yet.`
     : on === total
       ? `LADOT lists all ${total} city cameras as active.`
       : `The city plans ${total} cameras. LADOT lists ${on} as active.`;
+}
+
+function overviewHTML() {
+  const total = state.cameras.length;
+  const lede = overviewLede();
   const byStreet = [...state.cameras].sort((a, b) => a.street.localeCompare(b.street) || a.from.localeCompare(b.from));
   return `
     <h1>Speed cameras in Los Angeles</h1>
-    <p class="lede">${lede} Enter an address to count the cameras near it, or map a drive to see the cameras on the way.</p>
-    <button type="button" class="btn" data-trip>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21v-8a4 4 0 0 1 4-4h9"/><path d="m15 4.5 4.5 4.5-4.5 4.5"/></svg>
-      Map a drive
-    </button>
+    <p class="lede">${lede}${OVERVIEW_HINT}</p>
+    <div class="actions">
+      <button type="button" class="btn" data-trip>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21v-8a4 4 0 0 1 4-4h9"/><path d="m15 4.5 4.5 4.5-4.5 4.5"/></svg>
+        Map a drive
+      </button>
+      <button type="button" class="btn btn--quiet" data-locate><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="1.6" class="fill"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>Near me</button>
+    </div>
     ${mapNotice()}
     <ul class="legend">
       ${tally(state.cameras).map(({ st, n }) => `<li data-status="${st.key}">
@@ -544,6 +574,7 @@ function resultsHTML() {
       <span class="count__what">${near.length === 1 ? 'camera' : 'cameras'} within ${span} <small>${where}</small></span>
     </h1>
     <p class="mix">${mix}</p>
+    ${o.kind === 'address' ? `<div class="actions actions--tight">${shareHTML('Share these results')}</div>` : ''}
     ${notice}${mapNotice()}
     <div class="seg" role="radiogroup" aria-label="Distance from the ${place}">
       ${RADII.map((r) => `<button type="button" role="radio" aria-checked="${r === state.radius}" tabindex="${r === state.radius ? 0 : -1}" data-radius="${r}">${plural(r, 'mile')}</button>`).join('')}
@@ -599,7 +630,11 @@ function detailHTML(cam) {
     </div>
     ${mapNotice()}
     <dl class="facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>
-    <a class="btn" href="https://www.google.com/maps/search/?api=1&query=${lat},${lon}" target="_blank" rel="noopener">Open in Google Maps</a>`;
+    <div class="actions">
+      <a class="btn" href="https://www.google.com/maps/search/?api=1&query=${lat},${lon}" target="_blank" rel="noopener" aria-label="Open in Google Maps">Google Maps</a>
+      <a class="btn btn--quiet" href="https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}" target="_blank" rel="noopener">Street View</a>
+      ${shareHTML()}
+    </div>`;
 }
 
 /** Fines, counting rules and source. Drawn apart from the view, so it keeps its open state and place. */
@@ -635,6 +670,7 @@ function renderFoot() {
 
 function render() {
   const cam = state.selected != null && state.cameras.find((c) => c.oid === state.selected);
+  el.view.removeAttribute('aria-busy');
   el.view.innerHTML = cam ? detailHTML(cam)
     : state.mode === 'trip' ? tripHTML()
       : state.origin ? resultsHTML() : overviewHTML();
@@ -650,6 +686,28 @@ function rerender() {
   if (hadFocus) focusHeading();
 }
 
+/** Share the link to this view: the phone's share sheet, or a copy of the link. */
+async function shareView(button) {
+  const url = location.href;
+  const title = document.title;
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+    try { await navigator.share({ title, url }); } catch { /* closed without sharing */ }
+    return;
+  }
+  const label = button.querySelector('span');
+  const before = label.textContent;
+  try {
+    await navigator.clipboard.writeText(url);
+    label.textContent = 'Link copied';
+    announce('Link copied.');
+  } catch {
+    label.textContent = 'Copy the address bar';
+    announce('This browser blocked the copy. Copy the link from the address bar.');
+  }
+  clearTimeout(button.copyTimer);
+  button.copyTimer = setTimeout(() => { if (button.isConnected) label.textContent = before; }, 2400);
+}
+
 el.view.addEventListener('click', (e) => {
   const row = e.target.closest('[data-oid]');
   if (row) {
@@ -662,6 +720,9 @@ el.view.addEventListener('click', (e) => {
   const route = e.target.closest('[data-route]');
   if (route) { pickRoute(Number(route.dataset.route)); return; }
   if (e.target.closest('[data-trip]')) { openTrip(); return; }
+  if (e.target.closest('[data-locate]')) { useMyLocation(el.input, el.locate); return; }
+  const share = e.target.closest('[data-share]');
+  if (share) { shareView(share); return; }
   if (e.target.closest('[data-retry]')) { planTrip(); return; }
   if (e.target.closest('[data-back]')) select(null);
 });
@@ -694,7 +755,7 @@ function snapHeights() {
   const vh = window.innerHeight;
   const top = el.search.getBoundingClientRect().bottom;
   const full = Math.max(200, Math.round(vh - top - 10));
-  return { peek: Math.min(176, full), half: Math.min(Math.round(vh * 0.5), full), full };
+  return { peek: Math.min(188, full), half: Math.min(Math.round(vh * 0.5), full), full };
 }
 
 function setSheet(name) {
@@ -1222,7 +1283,8 @@ function tripHTML() {
   const t = state.trip;
   const ends = t.from && t.to ? `${esc(spotName(t.from))} to ${esc(spotName(t.to))}` : '';
   if (t.phase === 'loading') {
-    return `<h1>Finding the route</h1><p class="lede">From ${ends}.</p>${mapNotice()}`;
+    return `<h1>Finding the route</h1><p class="lede">From ${ends}.</p>${mapNotice()}
+      <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>`;
   }
   if (t.phase === 'failed') {
     return `<h1>The route did not load</h1>
@@ -1279,6 +1341,7 @@ function tripHTML() {
       <span class="count__what">${n === 1 ? 'camera' : 'cameras'} on this route <small>${ends.charAt(0).toUpperCase()}${ends.slice(1)}</small></span>
     </h1>
     <p class="mix">${mix}</p>
+    ${t.from?.kind === 'address' && t.to?.kind === 'address' ? `<div class="actions actions--tight">${shareHTML('Share this drive')}</div>` : ''}
     ${notice}${mapNotice()}
     ${chooser}
     ${n ? `<h2>On the way, in driving order</h2><ol class="cams">${hits.map(row).join('')}</ol>` : ''}
@@ -1448,6 +1511,15 @@ el.swap.addEventListener('click', () => {
   dismiss();
   planTrip({ preferKind });
   announce('Start and end swapped.');
+});
+
+// "/" jumps to the search field, as on most map sites. Not while typing in a field.
+addEventListener('keydown', (e) => {
+  if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+  e.preventDefault();
+  (state.mode === 'trip' ? (el.from.value ? el.to : el.from) : el.input).focus();
 });
 
 /* ---------- Start ---------- */
