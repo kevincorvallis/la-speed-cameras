@@ -88,9 +88,29 @@ export function inGeometry(geom, lon, lat) {
     inRing(lon, lat, outer) && !holes.some((h) => inRing(lon, lat, h)));
 }
 
+const geomBoxes = new WeakMap();
+
+function boxOfGeometry(geom) {
+  let box = geomBoxes.get(geom);
+  if (box) return box;
+  box = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const poly of polygonsOf(geom)) {
+    for (const [lon, lat] of poly[0]) {
+      if (lon < box[0]) box[0] = lon;
+      if (lon > box[2]) box[2] = lon;
+      if (lat < box[1]) box[1] = lat;
+      if (lat > box[3]) box[3] = lat;
+    }
+  }
+  geomBoxes.set(geom, box);
+  return box;
+}
+
 /** Council district number for a point, or null when the point is outside the city. */
 export function districtAt(city, lon, lat) {
   for (const f of city.features) {
+    const b = boxOfGeometry(f.geometry);
+    if (lon < b[0] || lon > b[2] || lat < b[1] || lat > b[3]) continue;
     if (inGeometry(f.geometry, lon, lat)) return f.properties.district;
   }
   return null;
@@ -567,6 +587,31 @@ export function camerasOnRoute(coords, cameras, corridorOf) {
   if (!usableLine(coords)) return { hits: [], crossed: [] };
   const samples = sampleLine(coords);
   const pts = samples.map((s) => flat([s.lon, s.lat]));
+  const CHUNK = 64;
+  const chunks = [];
+  let rMinX = Infinity;
+  let rMinY = Infinity;
+  let rMaxX = -Infinity;
+  let rMaxY = -Infinity;
+  for (let start = 0; start < pts.length; start += CHUNK) {
+    const end = Math.min(pts.length, start + CHUNK);
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = start; i < end; i++) {
+      const [x, y] = pts[i];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    chunks.push({ start, end, minX, minY, maxX, maxY });
+    if (minX < rMinX) rMinX = minX;
+    if (maxX > rMaxX) rMaxX = maxX;
+    if (minY < rMinY) rMinY = minY;
+    if (maxY > rMaxY) rMaxY = maxY;
+  }
   const hits = [];
   const crossed = [];
   for (const cam of cameras) {
@@ -574,30 +619,46 @@ export function camerasOnRoute(coords, cameras, corridorOf) {
     if (!geom) {
       // No stretch on file (a camera LADOT added after the saved copy). Use its point.
       const [cx, cy] = flat([cam.lon, cam.lat]);
-      const i = pts.findIndex((p) => Math.hypot(p[0] - cx, p[1] - cy) <= POINT_REACH);
-      if (i >= 0) hits.push({ oid: cam.oid, at: samples[i].at, miles: 0, line: [] });
+      if (cx + POINT_REACH < rMinX || cx - POINT_REACH > rMaxX || cy + POINT_REACH < rMinY || cy - POINT_REACH > rMaxY) {
+        continue;
+      }
+      let hitIdx = -1;
+      for (const c of chunks) {
+        if (cx + POINT_REACH < c.minX || cx - POINT_REACH > c.maxX || cy + POINT_REACH < c.minY || cy - POINT_REACH > c.maxY) {
+          continue;
+        }
+        for (let i = c.start; i < c.end; i++) {
+          if (Math.hypot(pts[i][0] - cx, pts[i][1] - cy) <= POINT_REACH) { hitIdx = i; break; }
+        }
+        if (hitIdx >= 0) break;
+      }
+      if (hitIdx >= 0) hits.push({ oid: cam.oid, at: samples[hitIdx].at, miles: 0, line: [] });
       continue;
     }
     const { box, outline } = shapeOf(geom);
+    if (box[2] < rMinX || box[0] > rMaxX || box[3] < rMinY || box[1] > rMaxY) continue;
     let first = -1;
     let inside = 0;
     let along = 0;
     const line = [];
-    for (let i = 0; i < samples.length; i++) {
-      const [x, y] = pts[i];
-      if (x < box[0] || x > box[2] || y < box[1] || y > box[3]) continue;
-      if (milesToGeometry(geom, samples[i].lat, samples[i].lon) > ROUTE_SLACK) continue;
-      if (first < 0) first = i;
-      const a = pts[Math.max(0, i - 1)];
-      const b = pts[Math.min(pts.length - 1, i + 1)];
-      const step = Math.hypot(b[0] - a[0], b[1] - a[1]) / (i > 0 && i < pts.length - 1 ? 2 : 1);
-      inside += step;
-      const axis = axisNear(outline, x, y);
-      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      const cos = axis && len ? Math.abs(((b[0] - a[0]) * axis[0] + (b[1] - a[1]) * axis[1]) / len) : 0;
-      if (cos >= ALONG_COS) {
-        along += step;
-        line.push([samples[i].lon, samples[i].lat]);
+    for (const c of chunks) {
+      if (c.maxX < box[0] || c.minX > box[2] || c.maxY < box[1] || c.minY > box[3]) continue;
+      for (let i = c.start; i < c.end; i++) {
+        const [x, y] = pts[i];
+        if (x < box[0] || x > box[2] || y < box[1] || y > box[3]) continue;
+        if (milesToGeometry(geom, samples[i].lat, samples[i].lon) > ROUTE_SLACK) continue;
+        if (first < 0) first = i;
+        const a = pts[Math.max(0, i - 1)];
+        const b = pts[Math.min(pts.length - 1, i + 1)];
+        const step = Math.hypot(b[0] - a[0], b[1] - a[1]) / (i > 0 && i < pts.length - 1 ? 2 : 1);
+        inside += step;
+        const axis = axisNear(outline, x, y);
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const cos = axis && len ? Math.abs(((b[0] - a[0]) * axis[0] + (b[1] - a[1]) * axis[1]) / len) : 0;
+        if (cos >= ALONG_COS) {
+          along += step;
+          line.push([samples[i].lon, samples[i].lat]);
+        }
       }
     }
     if (first < 0) continue;

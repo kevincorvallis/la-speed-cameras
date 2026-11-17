@@ -26,6 +26,20 @@ test.describe('first screen', () => {
     await expect(page.locator('.skeleton')).toHaveCount(0);
   });
 
+  test('the counts paint before the map code loads', async ({ page }) => {
+    await mockNetwork(page);
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    await page.route('**/vendor/maplibre-gl.mjs', async (route) => { await gate; await route.continue(); });
+    await page.goto('/');
+    await expect(page.locator('.legend li')).toHaveCount(2);
+    await expect(page.locator('#view')).not.toHaveAttribute('aria-busy', /.*/);
+    await expect(page.locator('#foot .source')).toContainText(/last changed|saved/);
+    await expect(page.locator('.cam')).toHaveCount(0);
+    release();
+    await expect(page.locator('.cam')).toHaveCount(cameras.length);
+  });
+
   test('the saved data fails: a plain message and a way to try again', async ({ page }) => {
     await mockNetwork(page);
     await page.route('**/data/corridors.geojson', (route) => route.fulfill({ status: 503, body: 'down' }));

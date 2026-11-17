@@ -83,42 +83,80 @@ function announce(text) {
 
 /* ---------- Data ---------- */
 
+const LADOT_CACHE_KEY = 'la-speed-cams:ladot:v1';
+const LADOT_CACHE_TTL = 15 * 60 * 1000;
+
 async function getJSON(url, ms = 9000) {
   const res = await fetch(url, { signal: AbortSignal.timeout(ms) });
   if (!res.ok) throw new Error(`${res.status} ${url}`);
   return res.json();
 }
 
-const [snapshot, corridors, city] = await Promise.all([
-  getJSON('data/cameras.json'), getJSON('data/corridors.geojson'), getJSON('data/city.geojson'),
-]).catch((err) => {
+function showDataError() {
   el.view.removeAttribute('aria-busy');
   el.view.innerHTML = '<h1>The camera data did not load</h1><p class="lede">Check the connection, then try again.</p><a class="btn" href="">Try again</a>';
+}
+
+function readLadotCache(savedAt) {
+  try {
+    const raw = localStorage.getItem(LADOT_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw);
+    if (cached?.savedAt !== savedAt || !Array.isArray(cached.cameras) || cached.cameras.length < 50) return null;
+    if (Date.now() - cached.fetchedAt > LADOT_CACHE_TTL) return null;
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+function writeLadotCache(savedAt, editedAt, cameras) {
+  try {
+    localStorage.setItem(LADOT_CACHE_KEY, JSON.stringify({ savedAt, fetchedAt: Date.now(), editedAt, cameras }));
+  } catch { /* ignore private mode or storage limits */ }
+}
+
+const camerasPromise = getJSON('data/cameras.json');
+const geoPromise = Promise.all([getJSON('data/corridors.geojson'), getJSON('data/city.geojson')]);
+
+let corridors = null;
+let city = null;
+let corridorOf = new Map();
+let dataFailed = false;
+
+const geoReady = geoPromise.then(
+  ([loadedCorridors, loadedCity]) => {
+    corridors = loadedCorridors;
+    city = loadedCity;
+    corridorOf = new Map(corridors.features.map((f) => [f.properties.oid, f.geometry]));
+  },
+  (err) => {
+    dataFailed = true;
+    showDataError();
+    throw err;
+  },
+);
+
+const snapshot = await camerasPromise.catch((err) => {
+  dataFailed = true;
+  showDataError();
   throw err;
 });
+if (dataFailed) throw new Error('Data load failed');
 state.cameras = snapshot.cameras;
 state.source.savedAt = snapshot.savedAt;
 state.source.editedAt = snapshot.ladotEditedAt;
 
-// The overview's opening line, in the panel now. render() draws the full view once the map code is in.
-if (!location.search) {
-  el.view.querySelector('.lede').innerHTML = `${esc(overviewLede())}${OVERVIEW_HINT}`;
+const cachedLadot = readLadotCache(snapshot.savedAt);
+if (cachedLadot) {
+  state.cameras = cachedLadot.cameras;
+  state.source.live = true;
+  state.source.editedAt = cachedLadot.editedAt ?? state.source.editedAt;
 }
-
-// The map code is the largest file by far. index.html preloads it beside the camera data, so it is
-// fetched and compiled by now, but running it holds the page for a while on a slow phone. Let the
-// panel paint first: the counts are the first thing a person reads. (A tab in the background gets
-// no frames, so a timer stands in.)
-await new Promise((resolve) => { requestAnimationFrame(() => setTimeout(resolve, 0)); setTimeout(resolve, 120); });
-const {
-  Map: GLMap, Marker, LngLatBounds, AttributionControl, NavigationControl,
-} = await import('./vendor/maplibre-gl.mjs');
-
-// The stretch of street each camera watches, by camera oid.
-const corridorOf = new Map(corridors.features.map((f) => [f.properties.oid, f.geometry]));
 
 /** Read the cameras LADOT publishes now. Returns true when anything changed. */
 async function refreshFromLadot() {
+  await geoReady;
   const metaCall = getJSON(`${LADOT_LAYER}?f=json`).catch(() => null); // only the date; may fail alone
   const live = await getJSON(`${LADOT_LAYER}/query?where=1%3D1&outFields=*&outSR=4326&f=geojson`);
   const next = mergeLive(state.cameras, live.features, (lon, lat) => districtAt(city, lon, lat));
@@ -126,36 +164,19 @@ async function refreshFromLadot() {
   state.cameras = next;
   state.source.live = true;
   state.source.editedAt = (await metaCall)?.editingInfo?.dataLastEditDate ?? state.source.editedAt;
+  writeLadotCache(state.source.savedAt, state.source.editedAt, state.cameras);
   return changed;
 }
 
 /* ---------- Map ---------- */
 
-const cityBounds = new LngLatBounds();
-for (const f of city.features) {
-  const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
-  for (const poly of polys) for (const pt of poly[0]) cityBounds.extend(pt);
-}
-
-const map = new GLMap({
-  container: 'map',
-  style: MAP_STYLE,
-  // A 3x phone screen draws 2.25 times the pixels of a 2x one, for no visible gain on a street map.
-  pixelRatio: Math.min(devicePixelRatio || 1, 2),
-  bounds: cityBounds,
-  fitBoundsOptions: { padding: mapPadding() },
-  attributionControl: false,
-  dragRotate: false,
-  pitchWithRotate: false,
-  touchPitch: false,
-  maxBounds: [[-121.5, 32.2], [-115.0, 36.2]],
-  minZoom: 7,
-});
-map.touchZoomRotate.disableRotation();
-map.keyboard.disableRotation();
-// On a phone the credit sits bottom left. It opens and closes as the map loads, and there it moves nothing else.
-map.addControl(new AttributionControl({ compact: true }), phone.matches ? 'bottom-left' : 'bottom-right');
-map.addControl(new NavigationControl({ showCompass: false }), 'bottom-right');
+let GL = null; // { Map, Marker, LngLatBounds, AttributionControl, NavigationControl }
+let map = null;
+let cityBounds = null;
+let mapLoaded = false;
+let resolveMapReady = () => {};
+const mapReady = new Promise((resolve) => { resolveMapReady = resolve; });
+const mapSize = { width: 0, height: 0 };
 
 const move = (opts) => (reduceMotion ? { ...opts, duration: 0 } : opts);
 
@@ -170,6 +191,7 @@ function mapPadding() {
 }
 
 function corridorData() {
+  if (!corridors) return { type: 'FeatureCollection', features: [] };
   const byOid = new Map(state.cameras.map((c) => [c.oid, c]));
   return {
     type: 'FeatureCollection',
@@ -179,86 +201,162 @@ function corridorData() {
   };
 }
 
-// "style.load" comes as soon as the style file is in. "load" waits for the first tiles too.
-// Our own layers go on at style.load, so the circle shows while street tiles still load.
-let mapLoaded = false;
-const mapReady = new Promise((resolve) => map.once('style.load', resolve));
-map.once('load', () => {
-  mapLoaded = true;
-  if (state.mapDown) { state.mapDown = false; rerender(); }
-  // The credit line opens by default. On a phone it starts closed, behind its button.
-  if (phone.matches) {
-    const credit = map.getContainer().querySelector('.maplibregl-ctrl-attrib');
-    credit?.classList.remove('maplibregl-compact-show');
-    credit?.removeAttribute('open');
-  }
-});
+function markMapDown() {
+  if (mapLoaded || state.mapDown) return;
+  state.mapDown = true;
+  rerender();
+}
 
-mapReady.then(() => {
-
-  const layers = map.getStyle().layers;
-  const firstRoad = layers.find((l) => l['source-layer'] === 'transportation')?.id;
-  const firstLabel = layers.find((l) => l.type === 'symbol')?.id;
-  const statusColor = ['match', ['get', 'status'], 'warn', '#f5b800', 'fine', '#d4281c', 'build', '#69717a', '#15181b'];
-
-  // City limits: the land inside the city reads a shade lighter than its neighbors.
-  map.addSource('city', { type: 'geojson', data: city });
-  map.addLayer({ id: 'city-fill', type: 'fill', source: 'city', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.6, 'fill-antialias': false } }, firstRoad);
-  map.addLayer({ id: 'city-line', type: 'line', source: 'city', paint: { 'line-color': '#15181b', 'line-opacity': 0.16, 'line-width': 1 } }, firstLabel);
-
-  // The stretch of street each camera watches. The outline keeps a thin street visible from far away.
-  map.addSource('corridors', { type: 'geojson', data: corridorData() });
-  map.addLayer({
-    id: 'corridors', type: 'fill', source: 'corridors',
-    paint: { 'fill-color': statusColor, 'fill-opacity': CORRIDOR_FILL },
-  }, firstLabel);
-  map.addLayer({
-    id: 'corridors-line', type: 'line', source: 'corridors',
-    paint: {
-      'line-color': statusColor,
-      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 1.2, 12, 2.5, 15, 1],
-      'line-opacity': CORRIDOR_LINE,
-    },
-  }, firstLabel);
-
-  map.addSource('radius', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-  map.addLayer({ id: 'radius-fill', type: 'fill', source: 'radius', paint: { 'fill-color': '#00664f', 'fill-opacity': 0.07 } }, firstLabel);
-  map.addLayer({ id: 'radius-line', type: 'line', source: 'radius', paint: { 'line-color': '#00664f', 'line-width': 1.6, 'line-dasharray': [3, 2.5] } }, firstLabel);
-
-  // A drive. The route lies under the camera stretches. The parts of it that run along
-  // a stretch lie over them, in the color of that camera's status.
-  const round = { 'line-cap': 'round', 'line-join': 'round' };
-  for (const id of ['trip-alt', 'trip', 'trip-hits']) {
-    map.addSource(id, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-  }
-  map.addLayer({ id: 'trip-alt-line', type: 'line', source: 'trip-alt', layout: round, paint: { 'line-color': '#7d868e', 'line-width': 5, 'line-opacity': 0.7 } }, 'corridors');
-  map.addLayer({ id: 'trip-alt-hit', type: 'line', source: 'trip-alt', layout: round, paint: { 'line-width': 16, 'line-opacity': 0 } }, 'corridors');
-  map.addLayer({ id: 'trip-case', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9 } }, 'corridors');
-  map.addLayer({ id: 'trip-line', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#00664f', 'line-width': 5 } }, 'corridors');
-  map.addLayer({ id: 'trip-hits-case', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 12 } }, firstLabel);
-  map.addLayer({ id: 'trip-hits-line', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': statusColor, 'line-width': 8 } }, firstLabel);
-  // A press on the other route picks it, unless the point also sits on the active route.
-  map.on('click', 'trip-alt-hit', (e) => {
-    if (map.queryRenderedFeatures(e.point, { layers: ['trip-line'] }).length) return;
-    const i = e.features?.[0]?.properties?.i;
-    if (i != null) pickRoute(Number(i));
+function loadStylesheet(href) {
+  return new Promise((resolve) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.onload = resolve;
+    link.onerror = resolve;
+    const mainCss = document.querySelector('link[href$="styles.css"]');
+    if (mainCss) mainCss.before(link);
+    else document.head.append(link);
   });
-  map.on('mousemove', 'trip-alt-hit', (e) => {
-    const onActive = map.queryRenderedFeatures(e.point, { layers: ['trip-line'] }).length > 0;
-    map.getCanvas().style.cursor = onActive ? '' : 'pointer';
-  });
-  map.on('mouseleave', 'trip-alt-hit', () => { map.getCanvas().style.cursor = ''; });
+}
 
-  drawRadius();
+function initMap(gl, loadedCity) {
+  GL = gl;
+  cityBounds = new GL.LngLatBounds();
+  for (const f of loadedCity.features) {
+    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+    for (const poly of polys) for (const pt of poly[0]) cityBounds.extend(pt);
+  }
+
+  map = new GL.Map({
+    container: 'map',
+    style: MAP_STYLE,
+    // A 3x phone screen draws 2.25 times the pixels of a 2x one, for no visible gain on a street map.
+    pixelRatio: Math.min(devicePixelRatio || 1, 2),
+    bounds: cityBounds,
+    fitBoundsOptions: { padding: mapPadding() },
+    attributionControl: false,
+    dragRotate: false,
+    pitchWithRotate: false,
+    touchPitch: false,
+    maxBounds: [[-121.5, 32.2], [-115.0, 36.2]],
+    minZoom: 7,
+  });
+  map.touchZoomRotate.disableRotation();
+  map.keyboard.disableRotation();
+  // On a phone the credit sits bottom left. It opens and closes as the map loads, and there it moves nothing else.
+  map.addControl(new GL.AttributionControl({ compact: true }), phone.matches ? 'bottom-left' : 'bottom-right');
+  map.addControl(new GL.NavigationControl({ showCompass: false }), 'bottom-right');
+
+  const container = map.getContainer();
+  const updateSize = () => {
+    const r = container.getBoundingClientRect();
+    mapSize.width = r.width;
+    mapSize.height = r.height;
+  };
+  updateSize();
+  if ('ResizeObserver' in window) new ResizeObserver(updateSize).observe(container);
+
+  // "style.load" comes as soon as the style file is in. "load" waits for the first tiles too.
+  // Our own layers go on at style.load, so the circle shows while street tiles still load.
+  map.once('style.load', resolveMapReady);
+  map.once('load', () => {
+    mapLoaded = true;
+    if (state.mapDown) { state.mapDown = false; rerender(); }
+    // The credit line opens by default. On a phone it starts closed, behind its button.
+    if (phone.matches) {
+      const credit = container.querySelector('.maplibregl-ctrl-attrib');
+      credit?.classList.remove('maplibregl-compact-show');
+      credit?.removeAttribute('open');
+    }
+  });
+  map.on('error', (e) => { if (!mapLoaded && e?.error) markMapDown(); });
+  map.getCanvas().addEventListener('webglcontextlost', markMapDown);
+
+  for (const type of ['dragstart', 'zoomstart']) {
+    map.on(type, (e) => { if (e.originalEvent) handMoved = true; });
+  }
+  map.on('move', () => {
+    if (layoutQueued) return;
+    layoutQueued = true;
+    requestAnimationFrame(() => { layoutQueued = false; layoutMarkers(); });
+  });
+
+  mapReady.then(() => {
+    const layers = map.getStyle().layers;
+    const firstRoad = layers.find((l) => l['source-layer'] === 'transportation')?.id;
+    const firstLabel = layers.find((l) => l.type === 'symbol')?.id;
+    const statusColor = ['match', ['get', 'status'], 'warn', '#f5b800', 'fine', '#d4281c', 'build', '#69717a', '#15181b'];
+
+    // City limits: the land inside the city reads a shade lighter than its neighbors.
+    map.addSource('city', { type: 'geojson', data: city });
+    map.addLayer({ id: 'city-fill', type: 'fill', source: 'city', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.6, 'fill-antialias': false } }, firstRoad);
+    map.addLayer({ id: 'city-line', type: 'line', source: 'city', paint: { 'line-color': '#15181b', 'line-opacity': 0.16, 'line-width': 1 } }, firstLabel);
+
+    // The stretch of street each camera watches. The outline keeps a thin street visible from far away.
+    map.addSource('corridors', { type: 'geojson', data: corridorData() });
+    map.addLayer({
+      id: 'corridors', type: 'fill', source: 'corridors',
+      paint: { 'fill-color': statusColor, 'fill-opacity': CORRIDOR_FILL },
+    }, firstLabel);
+    map.addLayer({
+      id: 'corridors-line', type: 'line', source: 'corridors',
+      paint: {
+        'line-color': statusColor,
+        'line-width': ['interpolate', ['linear'], ['zoom'], 9, 1.2, 12, 2.5, 15, 1],
+        'line-opacity': CORRIDOR_LINE,
+      },
+    }, firstLabel);
+
+    map.addSource('radius', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'radius-fill', type: 'fill', source: 'radius', paint: { 'fill-color': '#00664f', 'fill-opacity': 0.07 } }, firstLabel);
+    map.addLayer({ id: 'radius-line', type: 'line', source: 'radius', paint: { 'line-color': '#00664f', 'line-width': 1.6, 'line-dasharray': [3, 2.5] } }, firstLabel);
+
+    // A drive. The route lies under the camera stretches. The parts of it that run along
+    // a stretch lie over them, in the color of that camera's status.
+    const round = { 'line-cap': 'round', 'line-join': 'round' };
+    for (const id of ['trip-alt', 'trip', 'trip-hits']) {
+      map.addSource(id, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    }
+    map.addLayer({ id: 'trip-alt-line', type: 'line', source: 'trip-alt', layout: round, paint: { 'line-color': '#7d868e', 'line-width': 5, 'line-opacity': 0.7 } }, 'corridors');
+    map.addLayer({ id: 'trip-alt-hit', type: 'line', source: 'trip-alt', layout: round, paint: { 'line-width': 16, 'line-opacity': 0 } }, 'corridors');
+    map.addLayer({ id: 'trip-case', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9 } }, 'corridors');
+    map.addLayer({ id: 'trip-line', type: 'line', source: 'trip', layout: round, paint: { 'line-color': '#00664f', 'line-width': 5 } }, 'corridors');
+    map.addLayer({ id: 'trip-hits-case', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 12 } }, firstLabel);
+    map.addLayer({ id: 'trip-hits-line', type: 'line', source: 'trip-hits', layout: round, paint: { 'line-color': statusColor, 'line-width': 8 } }, firstLabel);
+    // A press on the other route picks it, unless the point also sits on the active route.
+    map.on('click', 'trip-alt-hit', (e) => {
+      if (map.queryRenderedFeatures(e.point, { layers: ['trip-line'] }).length) return;
+      const i = e.features?.[0]?.properties?.i;
+      if (i != null) pickRoute(Number(i));
+    });
+    map.on('mousemove', 'trip-alt-hit', (e) => {
+      const onActive = map.queryRenderedFeatures(e.point, { layers: ['trip-line'] }).length > 0;
+      map.getCanvas().style.cursor = onActive ? '' : 'pointer';
+    });
+    map.on('mouseleave', 'trip-alt-hit', () => { map.getCanvas().style.cursor = ''; });
+
+    drawRadius();
+    drawTrip();
+  });
+
+  // Safety net if a tile host stalls silently without firing an error event.
+  setTimeout(markMapDown, 10000);
+
+  if (['localhost', '127.0.0.1'].includes(location.hostname)) {
+    window.__app = { map, state, setOrigin, geocode, countyCandidates, locate };
+  }
+
+  drawOrigin();
   drawTrip();
-});
+  syncMarkers();
+  const cam = state.selected != null && state.cameras.find((c) => c.oid === state.selected);
+  if (cam) focusCamera(cam, { instant: true });
+  else if (state.origin || state.trip.routes.length) frameResults({ instant: true });
+}
 
-// A blocked or broken tile host would leave a silent blank map. Say so instead.
-setTimeout(() => {
-  if (!mapLoaded) { state.mapDown = true; rerender(); }
-}, 10000);
-
-const markers = new Map(); // oid -> { marker, node, btn }
+const markers = new Map(); // oid -> { marker, node, btn, isSign, tabIndex }
+let orderedCameras = [];
 
 /** The closest camera, when the search circle is empty. It still shows as a sign. */
 function loneCamera() {
@@ -280,6 +378,7 @@ function limitWords(cam) {
 }
 
 function syncMarkers() {
+  if (!map || !GL) return;
   const live = new Set(state.cameras.map((c) => c.oid));
   for (const [oid, m] of markers) {
     if (!live.has(oid)) { m.marker.remove(); markers.delete(oid); }
@@ -297,7 +396,7 @@ function syncMarkers() {
         e.stopPropagation();
         select(oid, { from: 'map' });
       });
-      m = { node, btn, marker: new Marker({ element: node }).setLngLat([cam.lon, cam.lat]).addTo(map) };
+      m = { node, btn, isSign: false, tabIndex: null, marker: new GL.Marker({ element: node }).setLngLat([cam.lon, cam.lat]).addTo(map) };
       markers.set(cam.oid, m);
     }
     const st = statusOf(cam.status);
@@ -310,38 +409,46 @@ function syncMarkers() {
     m.node.classList.toggle('is-near', isNear(cam, lone));
     m.node.classList.toggle('is-selected', state.selected === cam.oid);
   }
+  const rank = (cam) => (state.selected === cam.oid ? 0 : isNear(cam, lone) ? 1 : 2);
+  orderedCameras = [...state.cameras].sort((a, b) => rank(a) - rank(b) || a.dist - b.dist || 0);
   layoutMarkers();
 }
 
 /** Signs where they fit, dots elsewhere. Markers off the screen leave the tab order. */
 function layoutMarkers() {
-  const { width, height } = map.getContainer().getBoundingClientRect();
+  if (!map) return;
+  if (!mapSize.width) {
+    const r = map.getContainer().getBoundingClientRect();
+    mapSize.width = r.width;
+    mapSize.height = r.height;
+  }
   const signsOn = map.getZoom() >= SIGN_ZOOM;
   const lone = loneCamera();
-  const rank = (cam) => (state.selected === cam.oid ? 0 : isNear(cam, lone) ? 1 : 2);
-  const items = [...state.cameras]
-    .sort((a, b) => rank(a) - rank(b) || a.dist - b.dist || 0)
-    .map((cam) => {
-      const pt = map.project([cam.lon, cam.lat]);
-      return { id: cam.oid, x: pt.x, y: pt.y, wants: signsOn || isNear(cam, lone), selected: state.selected === cam.oid };
-    });
-  const { signs, onScreen } = layoutSigns(items, { width, height });
+  const items = orderedCameras.map((cam) => {
+    const pt = map.project([cam.lon, cam.lat]);
+    return { id: cam.oid, x: pt.x, y: pt.y, wants: signsOn || isNear(cam, lone), selected: state.selected === cam.oid };
+  });
+  const { signs, onScreen } = layoutSigns(items, mapSize);
   for (const [oid, m] of markers) {
-    m.node.classList.toggle('is-sign', signs.has(oid));
-    m.btn.tabIndex = onScreen.has(oid) ? 0 : -1;
+    const nextSign = signs.has(oid);
+    if (m.isSign !== nextSign) {
+      m.isSign = nextSign;
+      m.node.classList.toggle('is-sign', nextSign);
+    }
+    const nextTab = onScreen.has(oid) ? 0 : -1;
+    if (m.tabIndex !== nextTab) {
+      m.tabIndex = nextTab;
+      m.btn.tabIndex = nextTab;
+    }
   }
 }
 
 let layoutQueued = false;
-map.on('move', () => {
-  if (layoutQueued) return;
-  layoutQueued = true;
-  requestAnimationFrame(() => { layoutQueued = false; layoutMarkers(); });
-});
 
 let originMarker = null;
 
 function drawRadius() {
+  if (!map) return;
   const src = map.getSource('radius');
   if (!src) return;
   const o = state.origin;
@@ -349,6 +456,7 @@ function drawRadius() {
 }
 
 function drawOrigin() {
+  if (!map || !GL) return;
   originMarker?.remove();
   originMarker = null;
   if (state.origin) {
@@ -356,28 +464,30 @@ function drawOrigin() {
     node.className = 'pin';
     node.setAttribute('role', 'img');
     node.setAttribute('aria-label', state.origin.label);
-    originMarker = new Marker({ element: node }).setLngLat([state.origin.lon, state.origin.lat]).addTo(map);
+    originMarker = new GL.Marker({ element: node }).setLngLat([state.origin.lon, state.origin.lat]).addTo(map);
   }
   drawRadius();
 }
 
 /** Fit the search circle, plus the closest camera when the circle is empty. */
 function frameResults(opts) {
+  if (!map || !GL) return;
   if (state.mode === 'trip') { frameTrip(opts); return; }
   const o = state.origin;
   const closest = o ? ranked()[0] : null;
   if (!o || (closest && closest.dist > FAR_MILES)) {
-    map.fitBounds(cityBounds, move({ padding: mapPadding(), duration: 900 }));
+    map.fitBounds(cityBounds, move({ padding: mapPadding(), duration: opts?.instant ? 0 : 900 }));
     return;
   }
   const ring = circle(o.lat, o.lon, state.radius, 24).geometry.coordinates[0];
-  const box = ring.reduce((b, pt) => b.extend(pt), new LngLatBounds());
+  const box = ring.reduce((b, pt) => b.extend(pt), new GL.LngLatBounds());
   if (closest && closest.dist > state.radius) box.extend([closest.lon, closest.lat]);
-  map.fitBounds(box, move({ padding: mapPadding(), maxZoom: 15.5, duration: 1100 }));
+  map.fitBounds(box, move({ padding: mapPadding(), maxZoom: 15.5, duration: opts?.instant ? 0 : 1100 }));
 }
 
 /** Centre a camera in the part of the map the panel does not cover. */
 function focusCamera(cam, { instant = false } = {}) {
+  if (!map) return;
   // An offset does this. A padding given to easeTo would stay on the map
   // and the next fitBounds would count it twice.
   const pad = mapPadding();
@@ -415,7 +525,14 @@ function summary() {
   return `${plural(near.length, 'camera')} within ${plural(state.radius, 'mile')} of ${where}.`;
 }
 
-function setOrigin(origin) {
+let originTicket = 0;
+
+async function setOrigin(origin) {
+  const mine = ++originTicket;
+  if (origin && !city) {
+    try { await geoReady; } catch { return; }
+    if (mine !== originTicket) return;
+  }
   state.origin = origin ? { ...origin, district: districtAt(city, origin.lon, origin.lat) } : null;
   state.selected = null;
   measure();
@@ -811,15 +928,12 @@ el.grip.addEventListener('keydown', (e) => {
 
 // Keep the view framed through window resizes and phone rotation,
 // until the person moves the map by hand.
-for (const type of ['dragstart', 'zoomstart']) {
-  map.on(type, (e) => { if (e.originalEvent) handMoved = true; });
-}
 let resizeTimer = 0;
 addEventListener('resize', () => {
   setSheet(state.sheet);
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    map.resize();
+    map?.resize();
     const cam = state.selected != null && state.cameras.find((c) => c.oid === state.selected);
     const typing = inputs.includes(document.activeElement); // a phone keyboard also resizes the window
     if (cam) focusCamera(cam, { instant: true });
@@ -1224,7 +1338,7 @@ function drawTrip() {
   const t = state.trip;
   const picked = t.routes[t.pick];
   tripOids = new Set((picked?.hits ?? []).map((h) => h.oid));
-  if (state.mode === 'trip') {
+  if (map && GL && state.mode === 'trip') {
     for (const [end, letter, word] of [['from', 'A', 'Start'], ['to', 'B', 'End']]) {
       const spot = t[end];
       if (!spot) continue;
@@ -1234,13 +1348,13 @@ function drawTrip() {
       node.textContent = letter;
       node.setAttribute('role', 'img');
       node.setAttribute('aria-label', `${word} of the drive: ${spot.label}`);
-      tripPins.push(new Marker({ element: node }).setLngLat([spot.lon, spot.lat]).addTo(map));
+      tripPins.push(new GL.Marker({ element: node }).setLngLat([spot.lon, spot.lat]).addTo(map));
     }
   }
   // While a route shows, the cameras off it fade, so the map agrees with the count.
   const hasRoute = Boolean(picked);
   el.root.classList.toggle('has-route', hasRoute);
-  if (!map.getSource('trip')) return; // the map style is not in yet: it draws the drive when it is
+  if (!map || !map.getSource('trip')) return; // the map style is not in yet: it draws the drive when it is
   if (hasRoute !== hadRoute) {
     hadRoute = hasRoute;
     map.setPaintProperty('corridors', 'fill-opacity', hasRoute ? 0.12 : CORRIDOR_FILL);
@@ -1258,16 +1372,17 @@ function drawTrip() {
 }
 
 /** Fit the picked route, or the ends entered so far. */
-function frameTrip({ quick = false } = {}) {
+function frameTrip({ quick = false, instant = false } = {}) {
+  if (!map || !GL) return;
   const t = state.trip;
   const picked = t.routes[t.pick];
   const pts = picked ? picked.coords : [t.from, t.to].filter(Boolean).map((spot) => [spot.lon, spot.lat]);
   if (!pts.length) {
-    map.fitBounds(cityBounds, move({ padding: mapPadding(), duration: 900 }));
+    map.fitBounds(cityBounds, move({ padding: mapPadding(), duration: instant ? 0 : 900 }));
     return;
   }
-  const box = pts.reduce((b, pt) => b.extend(pt), new LngLatBounds());
-  map.fitBounds(box, move({ padding: mapPadding(), maxZoom: 14.5, duration: quick ? 650 : 950 }));
+  const box = pts.reduce((b, pt) => b.extend(pt), new GL.LngLatBounds());
+  map.fitBounds(box, move({ padding: mapPadding(), maxZoom: 14.5, duration: instant ? 0 : quick ? 650 : 950 }));
 }
 
 function tripSummary() {
@@ -1380,8 +1495,10 @@ async function planTrip({ preferKind = null, keepSelected = null } = {}) {
   show();
   const done = busy();
   let found = null;
-  try { found = await fetchRoutes(t.from, t.to); } catch { /* no route service answered */ } finally { done(); }
-  if (mine !== tripTicket) return;
+  try {
+    [found] = await Promise.all([fetchRoutes(t.from, t.to), geoReady]);
+  } catch { /* no route service answered or data failed */ } finally { done(); }
+  if (mine !== tripTicket || dataFailed) return;
   let routes = [];
   // A malformed route must not leave the panel on "Finding the route".
   try { routes = found ? found.routes.map(scored) : []; } catch { found = null; }
@@ -1524,10 +1641,6 @@ addEventListener('keydown', (e) => {
 
 /* ---------- Start ---------- */
 
-if (['localhost', '127.0.0.1'].includes(location.hostname)) {
-  window.__app = { map, state, setOrigin, geocode, countyCandidates, locate };
-}
-
 const initial = parseParams(location.search);
 state.radius = initial.radius;
 if (initial.mode === 'trip') {
@@ -1541,11 +1654,8 @@ if (initial.mode === 'trip') {
   if (initial.from && initial.to) {
     planTrip({ preferKind: initial.routeKind, keepSelected: initial.selected });
   } else {
-    drawTrip();
-    syncMarkers();
     render();
     setSheet('peek');
-    frameResults();
     if (initial.selected != null && state.cameras.some((c) => c.oid === initial.selected)) {
       select(initial.selected, { from: 'map' });
     }
@@ -1553,13 +1663,13 @@ if (initial.mode === 'trip') {
 } else if (initial.origin) {
   el.input.value = initial.origin.label;
   el.clear.hidden = false;
-  setOrigin(initial.origin);
-  if (initial.selected != null && state.cameras.some((c) => c.oid === initial.selected)) {
-    select(initial.selected, { from: 'map' });
-  }
+  setOrigin(initial.origin).then(() => {
+    if (initial.selected != null && state.cameras.some((c) => c.oid === initial.selected)) {
+      select(initial.selected, { from: 'map' });
+    }
+  });
 } else {
   measure();
-  syncMarkers();
   render();
   setSheet('peek');
   if (initial.selected != null && state.cameras.some((c) => c.oid === initial.selected)) {
@@ -1569,16 +1679,44 @@ if (initial.mode === 'trip') {
 renderFoot();
 readyForURL = true;
 
-refreshFromLadot()
-  .then(async (changed) => {
-    renderFoot(); // the source line now names the live data
-    if (!changed) return;
-    // Something changed at LADOT. Redraw, and keep the reader's place.
-    measure();
-    rescoreTrip();
-    syncMarkers();
-    rerender();
-    await mapReady;
-    map.getSource('corridors')?.setData(corridorData());
+// Let the panel paint first, then load MapLibre CSS + JS and boot the map during idle time.
+const afterFirstPaint = () => new Promise((resolve) => {
+  requestAnimationFrame(() => {
+    if ('requestIdleCallback' in window) requestIdleCallback(resolve, { timeout: 250 });
+    else setTimeout(resolve, 0);
+  });
+  setTimeout(resolve, 120);
+});
+
+afterFirstPaint()
+  .then(() => Promise.all([
+    loadStylesheet('vendor/maplibre-gl.css'),
+    import('./vendor/maplibre-gl.mjs'),
+    geoReady,
+  ]))
+  .then(([, gl]) => {
+    if (!dataFailed) initMap(gl, city);
   })
-  .catch((err) => console.warn('Using the saved camera copy:', err.message));
+  .catch((err) => {
+    if (!dataFailed) {
+      markMapDown();
+      console.warn('Map did not load:', err.message);
+    }
+  });
+
+if (!cachedLadot) {
+  refreshFromLadot()
+    .then(async (changed) => {
+      if (dataFailed) return;
+      renderFoot(); // the source line now names the live data
+      if (!changed) return;
+      // Something changed at LADOT. Redraw, and keep the reader's place.
+      measure();
+      rescoreTrip();
+      syncMarkers();
+      rerender();
+      await mapReady;
+      map?.getSource('corridors')?.setData(corridorData());
+    })
+    .catch((err) => console.warn('Using the saved camera copy:', err.message));
+}
