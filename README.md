@@ -70,6 +70,7 @@ When LADOT's live data does not load, or its fields change, the page keeps the s
 
 - The page has a content security policy (the `meta` tag at the top of `index.html`). It lets the page run code only from this site and call only the services it names. Add a new service's host there, or the browser blocks it.
 - `vercel.json` adds headers that stop other sites from framing the page and limit device permissions to location.
+- The referrer policy (a header in `vercel.json` and a `meta` tag in `index.html`) sends only the site name with each request. The page address can hold a searched address, so it must not travel in the `Referer` header.
 - Text from outside services goes through `esc` before it enters the page.
 - A camera position from LADOT outside greater Los Angeles is not trusted: the camera keeps its saved place. A route outside California, or longer than 600 miles, is rejected.
 - The web address holds the current search or drive, so a link can be shared. A position from the device's location never goes into it.
