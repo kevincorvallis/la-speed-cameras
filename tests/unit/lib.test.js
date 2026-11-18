@@ -6,7 +6,7 @@ import {
   formatMiles, plural, fold, cleanQuery, placeKey, placeFromText, placeFromPhoton, tidyParcel,
   placeFromCandidate, looksLike, mergeSuggestions, decideOnEnter, decideFromSuggestions,
   streetKey, mergeLive, signature, layoutSigns, snapFor,
-  formatParams, parseParams,
+  formatParams, parseParams, bareURL,
 } from '../../lib.js';
 
 const place = (text, extra) => placeFromText(text, extra);
@@ -587,5 +587,17 @@ describe('formatParams and parseParams', () => {
     assert.equal(parsed.to, null);
     assert.equal(parsed.radius, 2);
     assert.equal(parsed.routeKind, 'fast');
+  });
+});
+
+describe('bareURL', () => {
+  test('cuts the address a share link holds', () => {
+    const link = 'https://laspeedcams.com/?at=34.08342,-118.33528&place=6300+Melrose+Ave%2C+Los+Angeles&mi=5';
+    assert.equal(bareURL(link), 'https://laspeedcams.com/');
+    assert.equal(bareURL('https://laspeedcams.com/?drive=1&fromName=City+Hall#top'), 'https://laspeedcams.com/');
+  });
+  test('leaves an address with no query as it is', () => {
+    assert.equal(bareURL('https://laspeedcams.com/'), 'https://laspeedcams.com/');
+    assert.equal(bareURL(undefined), undefined);
   });
 });

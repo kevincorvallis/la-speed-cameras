@@ -797,3 +797,6 @@ export function parseParams(search) {
   const origin = parsePoint(p.get('at'), p.get('place'));
   return { mode: 'near', origin, radius, from: null, to: null, routeKind: 'fast', selected };
 }
+
+/** A page address without its query string and hash. A share link holds the searched address there. */
+export const bareURL = (url) => (typeof url === 'string' ? url.split(/[?#]/)[0] : url);

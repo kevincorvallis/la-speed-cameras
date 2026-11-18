@@ -3,8 +3,18 @@ import {
   cleanQuery, placeFromText, placeFromPhoton, placeFromCandidate, looksLike, mergeSuggestions,
   decideOnEnter, decideFromSuggestions, mergeLive, signature, layoutSigns, snapFor,
   camerasOnRoute, routeFromValhalla, routeFromOsrm, sameRoute, formatMinutes,
-  formatParams, parseParams,
+  formatParams, parseParams, bareURL,
 } from './lib.js';
+
+// Vercel's two scripts load after this file and send the page address with each report.
+// Queue the hook that cuts the query string before they start: it can hold a searched address.
+window.va = window.va || function va() { (window.vaq = window.vaq || []).push(arguments); };
+window.si = window.si || function si() { (window.siq = window.siq || []).push(arguments); };
+const cutQuery = (report) => ({ ...report, url: bareURL(report.url) });
+window.va('beforeSend', cutQuery);
+window.si('beforeSend', cutQuery);
+/** Count one action in Vercel Web Analytics. Send kinds and counts only: no address, name or position. */
+const track = (name, data) => window.va('event', { name, data });
 
 const LADOT_LAYER = 'https://services.arcgis.com/G3nmNsarwQblLhip/arcgis/rest/services/CameraSystems_streetnames2/FeatureServer/0';
 const LADOT_PAGE = 'https://ladot.lacity.gov/speed-safety-system#locations';
@@ -1096,9 +1106,10 @@ async function lookup(q) {
 }
 
 /** A place is set for a field: the address, or one end of a drive. */
-function usePlace(input, spot) {
-  if (input === el.input) setOrigin(spot);
-  else setEnd(input === el.from ? 'from' : 'to', spot);
+async function usePlace(input, spot) {
+  if (input !== el.input) { setEnd(input === el.from ? 'from' : 'to', spot); return; }
+  await setOrigin(spot);
+  track('Address search', { kind: spot.kind, cameras: state.cameras.filter((c) => c.dist <= state.radius).length });
 }
 
 function syncTripClear() {
@@ -1470,7 +1481,7 @@ function tripHTML() {
 let tripTicket = 0; // guards the route: a swap, a new end or a closed drive drops an older answer
 
 /** Find the routes for the two ends, count their cameras and show them. */
-async function planTrip({ preferKind = null, keepSelected = null } = {}) {
+async function planTrip({ preferKind = null, keepSelected = null, report = true } = {}) {
   const t = state.trip;
   const mine = ++tripTicket;
   state.selected = null;
@@ -1515,6 +1526,11 @@ async function planTrip({ preferKind = null, keepSelected = null } = {}) {
     if (keepSelected != null && state.cameras.some((c) => c.oid === keepSelected)) {
       state.selected = keepSelected;
     }
+  }
+  if (report) {
+    track('Drive lookup', t.phase === 'ready'
+      ? { result: 'ready', cameras: t.routes[t.pick].hits.length }
+      : { result: t.phase });
   }
   setSheet('half');
   show();
@@ -1652,7 +1668,7 @@ if (initial.mode === 'trip') {
   measure();
   showMode();
   if (initial.from && initial.to) {
-    planTrip({ preferKind: initial.routeKind, keepSelected: initial.selected });
+    planTrip({ preferKind: initial.routeKind, keepSelected: initial.selected, report: false });
   } else {
     render();
     setSheet('peek');
