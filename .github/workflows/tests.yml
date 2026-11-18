@@ -34,7 +34,8 @@ jobs:
     # Playwright 1.60 cannot install its browsers on Ubuntu 26.04, which ubuntu-latest now is.
     # Move this back to ubuntu-latest together with a Playwright version that supports it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # A run takes 13 to 19 minutes. The limit leaves room for a slow run.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
