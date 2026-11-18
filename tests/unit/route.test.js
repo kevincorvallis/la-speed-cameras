@@ -136,6 +136,14 @@ describe('camerasOnRoute: rules', () => {
     const away = { ...cam, oid: 'new-2', lat: cam.lat + 0.01 };
     assert.deepEqual(camerasOnRoute(coords, [away], new Map()).hits, []);
   });
+  test('a long route spanning California counts the same cameras on its LA portion', () => {
+    const la = routeFromValhalla(fixtures['streets:cityHall-santaMonica'].trip).coords;
+    const expected = camerasOnRoute(la, cameras, corridorOf);
+    const extended = [...la, [-121.89, 37.33]]; // extend to San Jose without crossing LA cameras again
+    const actual = camerasOnRoute(extended, cameras, corridorOf);
+    assert.deepEqual(oids(actual.hits), oids(expected.hits));
+    assert.deepEqual(oids(actual.crossed), oids(expected.crossed));
+  });
 });
 
 describe('routeFromValhalla and routeFromOsrm', () => {
