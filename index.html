@@ -117,9 +117,9 @@
   <noscript><p class="noscript">This map needs JavaScript.</p></noscript>
   <script type="module" src="app.js"></script>
   <!-- Vercel Web Analytics and Speed Insights. Same-origin scripts, so the policy above
-       (script-src 'self', connect-src 'self') already allows them. The docs' inline
-       window.va / window.si queue stubs are left out: the policy blocks inline scripts,
-       and nothing here calls va() or si() before the scripts load. -->
+       (script-src 'self', connect-src 'self') already allows them. The policy blocks the
+       docs' inline window.va / window.si queue stubs, so app.js sets them. Keep app.js above
+       these two scripts: it queues the hook that cuts the query string from what they send. -->
   <script defer src="/_vercel/insights/script.js"></script>
   <script defer src="/_vercel/speed-insights/script.js"></script>
 </body>
