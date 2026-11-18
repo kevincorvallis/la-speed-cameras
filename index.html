@@ -5,6 +5,8 @@
   <!-- The page may load code only from this site, and may call only the services it names.
        A new outside service needs its host added here. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://services.arcgis.com https://geocode.gis.lacounty.gov https://photon.komoot.io https://valhalla1.openstreetmap.de https://routing.openstreetmap.de https://tiles.openfreemap.org; base-uri 'none'; object-src 'none'; form-action 'self'">
+  <!-- Requests from this page name the site only. The page address can hold a searched address. -->
+  <meta name="referrer" content="strict-origin">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>LA Speed Cams: Los Angeles speed cameras near you</title>
   <meta name="description" content="See every Los Angeles speed camera on a map. Enter an address to count the cameras near it, or map a drive to see the cameras on the way. Live LADOT data.">

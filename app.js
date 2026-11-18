@@ -1109,6 +1109,8 @@ async function lookup(q) {
 async function usePlace(input, spot) {
   if (input !== el.input) { setEnd(input === el.from ? 'from' : 'to', spot); return; }
   await setOrigin(spot);
+  const o = state.origin;
+  if (state.mode !== 'near' || o?.lat !== spot.lat || o?.lon !== spot.lon) return; // a newer action took over, or the data failed
   track('Address search', { kind: spot.kind, cameras: state.cameras.filter((c) => c.dist <= state.radius).length });
 }
 

@@ -30,6 +30,24 @@ test.describe('address search event', () => {
     expect(await events(page)).toEqual([{ name: 'Address search', data: { kind: 'address', cameras: near } }]);
   });
 
+  test('a pick that a newer action replaced sends no event', async ({ page }) => {
+    await mockNetwork(page);
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    await page.route('**/data/city.geojson', async (route) => { await gate; await route.continue(); });
+    await page.goto('/');
+    await expect(page.locator('.legend li')).toHaveCount(2);
+    await page.locator('#q').fill('6300 mel');
+    await Promise.all([
+      page.waitForResponse((res) => res.url().includes('findAddressCandidates')),
+      press(option(page, '6300 Melrose Ave')),
+    ]);
+    await press(page.locator('#clear'));
+    release();
+    await page.waitForFunction(() => window.__app?.map.loaded());
+    expect(await events(page)).toEqual([]);
+  });
+
   test('a shared address link sends no event', async ({ page }) => {
     await mockNetwork(page);
     await page.goto(`/${NEAR}`);
@@ -84,5 +102,17 @@ test.describe('what Vercel gets', () => {
     }));
     expect(page.url()).toContain('place=');
     expect(sent).toEqual([`${new URL(page.url()).origin}/`, `${new URL(page.url()).origin}/`]);
+  });
+
+  test('a request to this site names the site only, not the searched address', async ({ page }) => {
+    await mockNetwork(page);
+    await page.goto(`/${NEAR}`);
+    await expect(page.locator('.count__n')).toHaveText(String(near));
+    const [request] = await Promise.all([
+      page.waitForRequest('**/robots.txt'),
+      page.evaluate(() => { fetch('/robots.txt').catch(() => {}); }),
+    ]);
+    expect(page.url()).toContain('place=');
+    expect((await request.allHeaders()).referer).toBe(`${new URL(page.url()).origin}/`);
   });
 });
